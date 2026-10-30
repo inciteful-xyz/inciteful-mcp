@@ -1,0 +1,115 @@
+import type { GraphMeta, SeedResolution } from './types.js';
+
+export const DATA_SOURCE = "OpenAlex metadata (CC0) via Inciteful's citation graph";
+export const ALWAYS_ADVISORY = 'Retraction and preprint flags: use get_papers.';
+const TITLE_FILTER_KEYS = ['title_all', 'title_any', 'title_none'];
+
+export type ProvenanceInput = {
+  now: Date;
+  tool: string;
+  serverVersion: string;
+  meta: GraphMeta;
+  seeds: SeedResolution[];
+  requestedDepth?: number;
+  /** The graph's `metadata` table as name → value. */
+  graphMeta?: Record<string, string>;
+  method: string;
+  filters: object;
+  sqlExecuted?: string;
+  effectiveLimit?: number;
+  fastPath?: 'similar' | 'connector';
+  connector?: { papersSearched: number; hops: number[] };
+  total?: number | null;
+};
+
+export type Diagnostics = { advisories: string[]; unresolved_seeds: Array<{ input: string; reason: string }> };
+
+/** Spec §4.4 coverage texts, chosen by whether the recent tier is live. */
+function coverageNote(snapshot: string | null, recentTier: string | null): string {
+  if (recentTier === null) {
+    return "The graph is built from the snapshot. Papers newer than the snapshot are looked up live only when named explicitly; they don't appear as neighbours.";
+  }
+  return `Snapshot ${snapshot ?? 'unknown'}, updated nightly through ${recentTier} with new papers that have a Crossref DOI. Other new papers are looked up live only when named.`;
+}
+
+const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+
+export function buildProvenance(input: ProvenanceInput): { provenance: object; diagnostics: Diagnostics } {
+  const gm = input.graphMeta ?? {};
+  // Missing keys (older cached graphs, fast paths) are null, never 0.
+  const num = (key: string): number | null => {
+    if (gm[key] === undefined) return null;
+    const n = Number(gm[key]);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  const graph: Record<string, unknown> = {
+    papers: num('paper_count'),
+    citations: num('citation_count'),
+    depth: num('graph_depth'),
+    prune_threshold: num('prune_threshold'),
+    highly_cited_not_expanded: num('highly_cited_not_expanded'),
+    seeds_not_expanded: num('seeds_not_expanded'),
+  };
+  if (input.fastPath === 'similar') {
+    Object.assign(graph, { papers: null, depth: 1, prune_threshold: null, highly_cited_not_expanded: null, note: 'not reported by the fast path' });
+  }
+
+  const resolved = input.seeds.filter(s => s.id !== null);
+  const unresolved = input.seeds.filter(s => s.id === null).map(s => ({ input: s.input, reason: s.reason ?? 'not_found' }));
+  const snapshot = gm.graph_snapshot ?? input.meta.snapshot;
+
+  const advisories: string[] = [];
+  // A connector always takes exactly two papers, so the seed-count advice doesn't apply to it.
+  if (input.fastPath !== 'connector' && resolved.length < 3) {
+    advisories.push(`Only ${plural(resolved.length, 'seed paper', 'seed papers')} resolved; with fewer than 3 seeds the results lean heavily on those papers, so add seeds for a broader picture.`);
+  }
+  for (const u of unresolved) advisories.push(`Seed "${u.input}" wasn't used: ${u.reason}.`);
+  const depth = graph.depth as number | null;
+  if (depth !== null && input.requestedDepth !== undefined && depth < input.requestedDepth) {
+    advisories.push(`The graph reached depth ${depth}, below the requested ${input.requestedDepth}, because the next layer was too large; results cover a smaller neighbourhood.`);
+  }
+  const highlyCited = graph.highly_cited_not_expanded as number | null;
+  if (highlyCited !== null && highlyCited > 0) {
+    advisories.push(`${plural(highlyCited, 'highly cited paper was', 'highly cited papers were')} over the prune threshold and not expanded; papers citing them may be missing.`);
+  }
+  const seedsNotExpanded = graph.seeds_not_expanded as number | null;
+  if (seedsNotExpanded !== null && seedsNotExpanded > 0) {
+    advisories.push(`${plural(seedsNotExpanded, 'seed paper was', 'seed papers were')} over the prune threshold and not expanded; papers citing them may be missing.`);
+  }
+  const filters = input.filters as Record<string, unknown>;
+  if (TITLE_FILTER_KEYS.some(k => Array.isArray(filters[k]) && (filters[k] as unknown[]).length > 0)) {
+    advisories.push('A title filter is in use: it matches paper titles only (not abstracts or full text), with Porter stemming, so relevant papers worded differently are left out.');
+  }
+  if (input.sqlExecuted !== undefined && input.effectiveLimit !== undefined) {
+    // graph-api replaces the outermost (last) LIMIT.
+    const userLimit = [...input.sqlExecuted.matchAll(/\blimit\s+(\d+)/gi)].at(-1)?.[1];
+    if (userLimit !== undefined && Number(userLimit) !== input.effectiveLimit) {
+      advisories.push(`graph-api applies LIMIT ${input.effectiveLimit} in place of the query's LIMIT`);
+    }
+  }
+  advisories.push(ALWAYS_ADVISORY);
+
+  const provenance: Record<string, unknown> = {
+    retrieved_at: input.now.toISOString().replace(/\.\d{3}Z$/, 'Z'),
+    tool: input.tool,
+    server_version: input.serverVersion,
+    data_source: DATA_SOURCE,
+    graph_snapshot: snapshot,
+    recent_tier: input.meta.recentTier,
+    coverage_note: coverageNote(snapshot, input.meta.recentTier),
+    seeds: resolved.map(s => ({ input: s.input, openalex_id: s.id })),
+    graph,
+    method: input.method,
+    filters: input.filters,
+    sql_executed: input.sqlExecuted ?? null,
+    effective_limit: input.effectiveLimit ?? null,
+  };
+  if (input.connector) {
+    provenance.papers_searched = input.connector.papersSearched;
+    provenance.hops = input.connector.hops;
+  }
+  if (input.total !== undefined) provenance.total = input.total;
+
+  return { provenance, diagnostics: { advisories, unresolved_seeds: unresolved } };
+}
