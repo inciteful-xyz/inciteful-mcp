@@ -6,8 +6,25 @@ export type SeedResolution = { input: string; id: string | null; reason: 'not_fo
 export type GraphMeta = { snapshot: string | null; recentTier: string | null };
 
 export interface BuildCapLike {
-  run<T>(key: string, fn: () => Promise<T>, deadlineMs: number): Promise<T>;
+  /**
+   * @param deadlineAt Absolute epoch-ms time on the injected clock (the same clock as `now()`).
+   * Set once per tool call at its start, as `now() + TOOL_CEILING_MS`, so time spent before the
+   * build (for example in `resolve`) counts against it.
+   */
+  run<T>(key: string, fn: () => Promise<T>, deadlineAt: number): Promise<T>;
 }
+
+/** graph-api's `CondensedPaperView`, with fields as serialized. */
+export type CondensedPaper = {
+  id: string;
+  doi?: string | null;
+  title: string;
+  published_year?: number | null;
+  journal?: string | null;
+  author?: Array<{ name: string }> | null;
+  num_cited_by: number;
+  num_citing: number;
+};
 
 export type UsageRow = {
   tool: string | null;

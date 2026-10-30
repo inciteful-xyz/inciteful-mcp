@@ -52,6 +52,14 @@ test('rejects_url_with_credentials', () => {
   }
 });
 
+test('rejects_url_with_query_or_fragment', () => {
+  for (const name of ['GRAPH_API_PRIMARY_URL', 'GRAPH_API_SECONDARY_URL', 'PUBLIC_BASE_URL']) {
+    for (const bad of ['https://example.com/?token=abc', 'https://example.com/#frag', 'https://example.com/path?x=1#y']) {
+      assert.throws(() => loadConfig({ ...valid(), [name]: bad }), { message: `${name} must not contain a query string or fragment` });
+    }
+  }
+});
+
 test('key_never_in_errors_or_inspection', () => {
   assert.throws(() => loadConfig({ ...valid(), GRAPH_API_PRIMARY_URL: `https://${SENTINEL}@example.com` }), (error: Error) => {
     assert.doesNotMatch(error.message, new RegExp(SENTINEL));
@@ -61,6 +69,10 @@ test('key_never_in_errors_or_inspection', () => {
   const config = loadConfig(valid());
   assert.doesNotMatch(inspect(config), new RegExp(SENTINEL));
   assert.doesNotMatch(inspect(config, { showHidden: true, depth: Infinity }), new RegExp(SENTINEL));
+  const raw = inspect(config, { customInspect: false, showHidden: true, depth: Infinity, getters: false });
+  assert.doesNotMatch(raw, new RegExp(SENTINEL));
+  assert.match(raw, /openalexKey\]?: \[Getter\]/);
+  assert.equal(config.openalexKey, SENTINEL);
   assert.doesNotMatch(JSON.stringify(config), new RegExp(SENTINEL));
   assert.doesNotMatch(String(config), new RegExp(SENTINEL));
   assert.doesNotMatch(`${config}`, new RegExp(SENTINEL));

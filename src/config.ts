@@ -16,6 +16,7 @@ function httpUrl(env: NodeJS.ProcessEnv, name: string): URL {
   try { url = new URL(raw); } catch { throw new Error(`${name} must be an http(s) URL`); }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error(`${name} must be an http(s) URL`);
   if (url.username || url.password) throw new Error(`${name} must not contain credentials`);
+  if (url.search || url.hash) throw new Error(`${name} must not contain a query string or fragment`);
   return url;
 }
 
@@ -29,7 +30,8 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
   const config = { graphPrimary, graphSecondary, publicBaseUrl, usageDbPath } as Config;
   // Non-enumerable, so a spread or Object.entries drops the key; toJSON and inspect redact it.
   Object.defineProperties(config, {
-    openalexKey: { value: openalexKey, enumerable: false },
+    // A getter over the closure: even inspect with customInspect: false shows [Getter], not the value.
+    openalexKey: { get: () => openalexKey, enumerable: false },
     toJSON: { value: visible, enumerable: false },
     [inspect.custom]: { value: () => visible(), enumerable: false },
   });
