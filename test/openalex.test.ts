@@ -95,7 +95,7 @@ test('bearer_only_never_in_url', async () => {
   await client.search('vagus nerve', { limit: 5 });
   await client.works(['W1', '10.1/x', 'pmid:1', 'PMC2']);
   await client.linked(['W1'], 'citations', 5);
-  assert.ok(calls.length >= 6);
+  assert.equal(calls.length, 6);
   for (const call of calls) {
     assert.equal(call.headers.get('authorization'), `Bearer ${KEY}`);
     assert.equal(call.url.href.includes(KEY), false);
@@ -146,7 +146,8 @@ test('batches_at_100_per_kind', async () => {
   assert.deepEqual(filterValues(calls.find(c => filterValues(c, 'pmcid').length)!, 'pmcid'), ['PMC7']);
   assert.equal(calls.length, 6);
   for (const call of calls) {
-    assert.equal(call.url.searchParams.get('per-page'), '100');
+    // 200 rows for at most 100 values: works sharing a DOI or PMID can't push a match off the page.
+    assert.equal(call.url.searchParams.get('per-page'), '200');
     assert.equal((call.url.searchParams.get('filter') ?? '').split(',').length, 1);
   }
   assert.equal(result.works.length, 150);

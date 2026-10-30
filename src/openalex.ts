@@ -3,8 +3,10 @@ import { z } from 'zod';
 import { OpenAlexBudgetExhausted, OpenAlexError } from './errors.js';
 
 const WORKS_URL = 'https://api.openalex.org/works';
-/** OpenAlex's cap on OR-values in one filter, and on `per-page`. */
+/** OpenAlex's cap on OR-values in one filter. */
 const MAX_OR_VALUES = 100;
+/** OpenAlex's `per-page` cap. Works sharing a DOI or PMID can return more rows than values. */
+const MAX_PER_PAGE = 200;
 const REQUEST_TIMEOUT_MS = 30_000;
 /** Fallback wait when a 429 names neither `Retry-After` nor `x-ratelimit-reset`. */
 const DEFAULT_RETRY_SECS = 3600;
@@ -244,7 +246,7 @@ export class OpenAlexClient {
     for (const p of parsed) if (p) byKind.set(p.kind, (byKind.get(p.kind) ?? new Set()).add(p.value));
     const batches = [...byKind].flatMap(([kind, values]) => chunks([...values], MAX_OR_VALUES).map(group => ({ kind, group })));
     const settled = await Promise.allSettled(batches.map(({ kind, group }) =>
-      this.#works({ filter: `${kind}:${group.join('|')}`, 'per-page': String(MAX_OR_VALUES) })));
+      this.#works({ filter: `${kind}:${group.join('|')}`, 'per-page': String(MAX_PER_PAGE) })));
 
     const found = new Map<string, Work>();
     const failed = new Set<string>();

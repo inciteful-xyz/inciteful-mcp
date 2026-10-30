@@ -79,7 +79,7 @@ test('an offset past the end returns no more text', async () => {
 
 test('abstract-only and wrong-article responses are not mislabeled as full text', () => {
   assert.throws(() => parseBioC([{ documents: [{ id: 'PMC1', passages: [{ text: 'Only abstract', infons: { section_type: 'ABSTRACT' } }] }] }]), /no full-text body/);
-  assert.throws(() => parseBioC(bio, false, 'PMC2'), /different article/);
+  assert.throws(() => parseBioC(bio, 'PMC2'), /different article/);
 });
 
 test('a work without a PMCID returns candidate links without downloading', async () => {
@@ -89,6 +89,7 @@ test('a work without a PMCID returns candidate links without downloading', async
   assert.equal(result.text, undefined);
   assert.equal(result.nextOffset, null);
   assert.equal(result.license, null);
+  assert.equal(result.sha256, null);
   assert.ok(result.links.length > 0);
 });
 
@@ -103,8 +104,10 @@ test('failed or unusable PMC responses fall back to candidate links', async () =
     const result = await new ContentClient(fake(respond).fetcher).readPaper(work, 0, 100);
     assert.equal(result.text, undefined);
     assert.equal(result.nextOffset, null);
+    assert.equal(result.sha256, null);
     assert.ok(result.links.length > 0);
   }
   const rejected = await new ContentClient(fake(() => { throw new TypeError('fetch failed'); }).fetcher).readPaper(work, 0, 100);
   assert.equal(rejected.text, undefined);
+  assert.equal(rejected.sha256, null);
 });

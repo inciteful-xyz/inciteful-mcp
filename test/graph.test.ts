@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { inspect } from 'node:util';
 import { GraphClient } from '../src/graph.js';
 import { GraphError, GraphUnavailableError, QueryTimeoutError } from '../src/errors.js';
 
@@ -47,6 +48,13 @@ test('falls_back_only_on_connection_error', async () => {
     assert.deepEqual(calls.map(c => c.url.host), ['primary.test', 'secondary.test'], code);
     assert.equal(calls[1].url.pathname, '/openalex/resolve', code);
   }
+});
+
+test('secondary_tried_at_most_once', async () => {
+  const error = connectionError('ECONNREFUSED');
+  const { fetcher, calls } = fake(() => { throw error; });
+  await assert.rejects(new GraphClient(cfg, fetcher).resolve(['W1']), (err: unknown) => err === error);
+  assert.deepEqual(calls.map(c => c.url.host), ['primary.test', 'secondary.test']);
 });
 
 test('no_fallback_on_headers_timeout_or_abort', async () => {
@@ -168,6 +176,11 @@ test('other_400_carries_body', async () => {
     assert.equal(err.status, 400);
     assert.equal(err.detail, body);
     assert.equal(err.message, 'The citation graph service returned an error.');
+    // The body echoes the user's SQL: it must not surface through inspect, JSON or a spread.
+    assert.equal(inspect(err, { depth: 10 }).includes('no such column'), false);
+    assert.equal(JSON.stringify(err).includes('no such column'), false);
+    assert.equal(JSON.stringify({ ...err }).includes('no such column'), false);
+    assert.equal(Object.keys(err).includes('detail'), false);
     return true;
   });
 });
@@ -181,6 +194,14 @@ test('similar_keeps_server_order', async () => {
   assert.equal(calls[0].url.pathname, '/openalex/paper/similar');
   assert.deepEqual(calls[0].url.searchParams.getAll('ids[]'), ['W2919115771', 'W2']);
   assert.equal(calls[0].url.searchParams.get('n'), '12');
+});
+
+test('similar_rejects_non_numeric_fields', async () => {
+  const [row] = similarSample;
+  for (const bad of [{ ...row, score: '2.3' }, { ...row, num_cited_by: null }, { ...row, num_citing: 'x' }, { ...row, id: 7 }]) {
+    const { fetcher } = fake(() => json([bad]));
+    await assert.rejects(new GraphClient(cfg, fetcher).similar(['W1'], 5), (err: unknown) => err instanceof GraphError && err.status === 200);
+  }
 });
 
 test('metadata_reads_name_value_rows', async () => {

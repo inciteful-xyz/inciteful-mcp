@@ -30,7 +30,7 @@ export function contentLinks(work: Work): ContentLink[] {
     const normalized = publicLink(url);
     if (normalized && !links.has(normalized)) links.set(normalized, { url: normalized, ...entry });
   };
-  const locations = [work.best_oa_location, ...(Array.isArray(work.locations) ? work.locations : []), work.primary_location];
+  const locations = [work.best_oa_location, ...work.locations, work.primary_location];
   for (const [index, item] of locations.entries()) {
     const location = object(item);
     const base = {
@@ -48,22 +48,21 @@ export function contentLinks(work: Work): ContentLink[] {
 
 const passageSchema = z.object({ text: z.string().default(''), infons: z.record(z.string(), z.unknown()).default({}) });
 const documentSchema = z.object({ id: z.string(), infons: z.record(z.string(), z.unknown()).default({}), passages: z.array(passageSchema) });
-export function parseBioC(data: unknown, abstractOnly = false, expectedId?: string) {
+export function parseBioC(data: unknown, expectedId?: string) {
   const collections = z.array(z.object({ documents: z.array(documentSchema) })).parse(data);
   const doc = collections.flatMap(c => c.documents)[0];
-  if (!doc) throw new Error('No article text was returned by PMC/PubMed.');
+  if (!doc) throw new Error('No article text was returned by PMC.');
   if (expectedId && doc.id.toUpperCase() !== expectedId.toUpperCase() &&
-    !doc.passages.some(p => String(p.infons['article-id_pmid']) === expectedId || String(p.infons['article-id_pmc']).toUpperCase() === expectedId.toUpperCase())) {
-    throw new Error('PMC/PubMed returned text for a different article identifier.');
+    !doc.passages.some(p => String(p.infons['article-id_pmc']).toUpperCase() === expectedId.toUpperCase())) {
+    throw new Error('PMC returned text for a different article identifier.');
   }
   const passages = doc.passages.filter(p => p.text.trim());
-  const abstracts = passages.filter(p => String(p.infons.section_type).toUpperCase() === 'ABSTRACT' || /^abstract/i.test(String(p.infons.type)));
   const body = passages.filter(p => !['TITLE', 'ABSTRACT', 'REF', 'REFS', 'REFERENCES'].includes(String(p.infons.section_type).toUpperCase()) && !/^abstract/i.test(String(p.infons.type)));
-  if (!abstractOnly && !body.length) throw new Error('The source returned an abstract but no full-text body.');
+  if (!body.length) throw new Error('The source returned an abstract but no full-text body.');
   return {
     id: doc.id, title: passages.find(p => String(p.infons.section_type).toUpperCase() === 'TITLE')?.text,
     license: string(doc.infons.license) ?? null,
-    text: (abstractOnly ? abstracts : passages).map(p => p.text).join('\n\n'),
+    text: passages.map(p => p.text).join('\n\n'),
   };
 }
 
@@ -73,7 +72,7 @@ const CACHE_ENTRIES = 8;
 const CACHE_TTL_MS = 15 * 60 * 1000;
 
 type Article = { text: string; sha256: string; license: string | null };
-export type ReadResult = { text?: string; nextOffset: number | null; sha256: string; license: string | null; links: ContentLink[] };
+export type ReadResult = { text?: string; nextOffset: number | null; sha256: string | null; license: string | null; links: ContentLink[] };
 
 /**
  * Full text from PMC BioC for works with a PMCID, paged by character offset. Otherwise, or when PMC
@@ -113,7 +112,7 @@ export class ContentClient {
     let article: Article;
     try {
       const url = new URL(`https://www.ncbi.nlm.nih.gov/research/bionlp/RESTful/pmcoa.cgi/BioC_json/${encodeURIComponent(pmcid)}/unicode`);
-      const parsed = parseBioC(JSON.parse(await this.#download(url)), false, pmcid);
+      const parsed = parseBioC(JSON.parse(await this.#download(url)), pmcid);
       article = { text: parsed.text, sha256: createHash('sha256').update(parsed.text).digest('hex'), license: parsed.license };
     } catch {
       // Not in the PMC open-access set, unreadable, or the wrong article: the caller gets links instead.
@@ -124,11 +123,11 @@ export class ContentClient {
     return article;
   }
 
-  /** `sha256` is of the whole article text, or `''` when no text was retrieved. */
+  /** `sha256` is of the whole article text, or `null` when no text was retrieved. */
   async readPaper(work: Work, offset: number, maxChars: number): Promise<ReadResult> {
     const links = contentLinks(work);
     const article = work.ids.pmcid ? await this.#article(work.ids.pmcid) : null;
-    if (!article) return { nextOffset: null, sha256: '', license: null, links };
+    if (!article) return { nextOffset: null, sha256: null, license: null, links };
     const start = Math.min(offset, article.text.length);
     const end = Math.min(article.text.length, start + maxChars);
     return {

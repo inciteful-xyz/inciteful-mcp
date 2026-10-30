@@ -8,11 +8,17 @@ export class GraphUnavailableError extends Error {
 
 /**
  * `detail` is graph-api's body text for a 400: the SQL error the client needs to fix its query.
- * It is upstream text, so it is never written to a log; it holds no URL or key.
+ * It echoes the user's SQL, so it is never logged. It sits behind a getter over a private field,
+ * so `util.inspect`, `JSON.stringify` and spreads of the error don't show it.
  */
 export class GraphError extends Error {
   override readonly name = 'GraphError';
-  constructor(readonly status: number, readonly detail: string | null = null) { super('The citation graph service returned an error.'); }
+  readonly #detail: string | null;
+  constructor(readonly status: number, detail: string | null = null) {
+    super('The citation graph service returned an error.');
+    this.#detail = detail;
+  }
+  get detail(): string | null { return this.#detail; }
 }
 
 export class QueryTimeoutError extends Error {

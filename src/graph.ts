@@ -129,7 +129,7 @@ export class GraphClient {
 
   /** graph-api's fast similarity, in its order (descending score; seeds and score-0 rows at the tail). */
   async similar(ids: string[], n: number): Promise<{ papers: SimilarPaper[] } & GraphMeta> {
-    const schema = z.array(paperSchema.extend({ score: z.number() }));
+    const schema = z.array(paperSchema.extend({ num_cited_by: z.number(), num_citing: z.number(), score: z.number() }));
     const { data, meta } = await this.#json(schema, 'openalex/paper/similar', withIds(ids, { n: String(n) }));
     return { papers: data as SimilarPaper[], ...meta };
   }
