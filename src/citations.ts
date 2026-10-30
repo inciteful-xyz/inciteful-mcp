@@ -41,6 +41,8 @@ const BIB_ESCAPES: Record<string, string> = {
   '~': '\\textasciitilde{}', '^': '\\textasciicircum{}',
 };
 const bibEscape = (s: string) => s.replace(/[\\{}%&$#_~^]/g, c => BIB_ESCAPES[c]!);
+/** An escaped author name. A name containing the word "and" is braced, so BibTeX keeps it as one author. */
+const bibAuthor = (name: string) => (/\band\b/i.test(name) ? `{${bibEscape(name)}}` : bibEscape(name));
 
 /** ASCII letters and digits only: accents are dropped from their base letters, everything else is removed. */
 const ascii = (s: string) => s.normalize('NFKD').replace(/[^A-Za-z0-9]/g, '');
@@ -77,7 +79,7 @@ export function toBibtex(works: Work[]): string {
     const last = clean(w.biblio.last_page);
     const fields: Array<[string, string | null]> = [
       ['title', clean(w.title)],
-      ['author', authors(w).join(' and ') || null],
+      ['author', authors(w).map(bibAuthor).join(' and ') || null],
       [VENUE_FIELD[kind.bib]!, venue(w)],
       ['year', w.publication_year === null ? null : String(w.publication_year)],
       ['volume', clean(w.biblio.volume)],
@@ -86,8 +88,9 @@ export function toBibtex(works: Work[]): string {
       ['doi', bareDoi(w.doi)],
       ['note', kind.preprint ? 'Preprint' : null],
     ];
+    // Author names are escaped in bibAuthor, so their grouping braces survive.
     const body = fields.filter((f): f is [string, string] => f[1] !== null)
-      .map(([name, value]) => `  ${name} = {${bibEscape(value)}},\n`).join('');
+      .map(([name, value]) => `  ${name} = {${name === 'author' ? value : bibEscape(value)}},\n`).join('');
     return `@${kind.bib}{${ks[i]},\n${body}}\n`;
   }).join('\n');
 }

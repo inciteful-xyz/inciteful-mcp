@@ -43,3 +43,21 @@ test('limits_terms', () => {
   // Empty terms are dropped before counting.
   assert.ok(buildTitleMatch({ all: [...twenty, '', ' '] }));
 });
+
+test('control_characters_are_stripped', () => {
+  assert.equal(buildTitleMatch({ all: ['ner\u0000ve\u0007'] }), 'search_text : ( ("nerve") )');
+  // Tabs and newlines between words become spaces, so the words stay apart.
+  assert.equal(buildTitleMatch({ all: ['vagal\tnerve\n'] }), 'search_text : ( ("vagal nerve") )');
+  assert.equal(buildTitleMatch({ all: ['\u0000\u001f'] }), null);
+});
+
+test('terms_without_letters_or_digits_are_dropped', () => {
+  assert.equal(buildTitleMatch({ all: ['nerve', '-'] }), buildTitleMatch({ all: ['nerve'] }));
+  assert.equal(buildTitleMatch({ all: ['nerve'], any: ['"', '...'], none: ['*'] }), 'search_text : ( ("nerve") )');
+  assert.equal(buildTitleMatch({ any: ['é'] }), 'search_text : ( ("é") )');
+  assert.equal(buildTitleMatch({ any: ['19'] }), 'search_text : ( ("19") )');
+  // Every term dropped: the usual rules apply.
+  assert.equal(buildTitleMatch({ all: ['-', '()'] }), null);
+  assert.throws(() => buildTitleMatch({ all: ['-'], none: ['covid'] }),
+    (e: unknown) => e instanceof TitleFilterError && e.message === 'title_none needs title_all or title_any');
+});

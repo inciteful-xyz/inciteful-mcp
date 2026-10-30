@@ -107,8 +107,17 @@ test('advisory_user_limit_replaced', () => {
   assert.deepEqual(a, ["graph-api applies LIMIT 500 in place of the query's LIMIT", ALWAYS]);
   assert.deepEqual(advisories({ sqlExecuted: 'SELECT * FROM papers limit 500', effectiveLimit: 500 }), [ALWAYS]);
   assert.deepEqual(advisories({ sqlExecuted: 'SELECT * FROM papers', effectiveLimit: 500 }), [ALWAYS]);
-  // The outer (last) LIMIT is the one graph-api replaces.
+  // Only a trailing top-level LIMIT counts; one inside a subquery or CTE never does.
   assert.equal(advisories({ sqlExecuted: 'SELECT * FROM (SELECT * FROM papers LIMIT 5) LIMIT 20', effectiveLimit: 20 }).length, 1);
+  assert.deepEqual(advisories({
+    sqlExecuted: 'WITH top AS (SELECT * FROM papers ORDER BY page_rank DESC LIMIT 50) SELECT * FROM top ORDER BY title',
+    effectiveLimit: 5,
+  }), [ALWAYS]);
+  assert.deepEqual(advisories({ sqlExecuted: 'SELECT * FROM (SELECT * FROM papers LIMIT 3)', effectiveLimit: 5 }), [ALWAYS]);
+  assert.deepEqual(advisories({
+    sqlExecuted: 'WITH top AS (SELECT * FROM papers LIMIT 50) SELECT * FROM top LIMIT 7', effectiveLimit: 5,
+  }), ["graph-api applies LIMIT 5 in place of the query's LIMIT", ALWAYS]);
+  assert.deepEqual(advisories({ sqlExecuted: '  SELECT * FROM papers\n LIMIT 7 ;\n', effectiveLimit: 5 }).length, 2);
 });
 
 test('nulls_not_zero_when_meta_missing', () => {

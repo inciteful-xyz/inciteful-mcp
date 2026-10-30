@@ -82,8 +82,8 @@ export function buildProvenance(input: ProvenanceInput): { provenance: object; d
     advisories.push('A title filter is in use: it matches paper titles only (not abstracts or full text), with Porter stemming, so relevant papers worded differently are left out.');
   }
   if (input.sqlExecuted !== undefined && input.effectiveLimit !== undefined) {
-    // graph-api replaces the outermost (last) LIMIT.
-    const userLimit = [...input.sqlExecuted.matchAll(/\blimit\s+(\d+)/gi)].at(-1)?.[1];
+    // Only a trailing top-level LIMIT; one inside a subquery or CTE is never read.
+    const userLimit = input.sqlExecuted.trim().match(/\blimit\s+(\d+)\s*;?\s*$/i)?.[1];
     if (userLimit !== undefined && Number(userLimit) !== input.effectiveLimit) {
       advisories.push(`graph-api applies LIMIT ${input.effectiveLimit} in place of the query's LIMIT`);
     }

@@ -14,7 +14,11 @@ const quote = (term: string) => `"${term.replace(/"/g, '""')}"`;
  * Returns null when no usable term is given.
  */
 export function buildTitleMatch(f: TitleFilter): string | null {
-  const clean = (terms: string[] | undefined) => (terms ?? []).map(t => t.trim()).filter(t => t !== '');
+  // Control characters are removed; tabs and newlines become spaces first, so the words they separate stay
+  // apart. A term with no letter or digit would be an empty FTS5 phrase, so it is dropped.
+  const clean = (terms: string[] | undefined) => (terms ?? [])
+    .map(t => t.replace(/[\t\n\v\f\r]/g, ' ').replace(/\p{Cc}/gu, '').trim())
+    .filter(t => /[\p{L}\p{N}]/u.test(t));
   const all = clean(f.all);
   const any = clean(f.any);
   const none = clean(f.none);

@@ -21,8 +21,11 @@ type Paper = {
   authors: Array<[authorId: string, name: string, affiliation: string, affiliationId: string]>;
 };
 
-/** Single seed: W1 at distance 0. Multiple: W0 at 0 (as the loader writes it), seeds W1 and W6 at 1. */
-function graph(multiple: boolean): DatabaseSync {
+/**
+ * Single seed: W1 at distance 0. Multiple: W0 at 0 (as the loader writes it), seeds W1 and W6 at 1.
+ * `extra` papers are given single-seed distances.
+ */
+function graph(multiple: boolean, extra: Paper[] = []): DatabaseSync {
   const d = (single: number) => (multiple ? single + 1 : single);
   const papers: Paper[] = [
     { id: 'W1', title: 'Seed paper on the vagus nerve', year: YEAR - 5, journal: 'Seed Journal', distance: d(0),
@@ -36,6 +39,10 @@ function graph(multiple: boolean): DatabaseSync {
       pr: 0.1, aa: 0.1, cocite: null, citing: 40, citedBy: 9, authors: [['A5', 'Old Reviewer', 'Old Inst', 'I4']] },
     { id: 'W5', title: 'Distant paper about dogs', year: YEAR - 2, journal: 'Dog Journal', distance: d(2),
       pr: 0.05, aa: null, cocite: null, citing: 1, citedBy: 1, authors: [['A6', 'Dog Person', 'Dog Inst', 'I5']] },
+    // Ranks second by page_rank but last by similarity, so the two orderings differ.
+    { id: 'W7', title: 'Loosely related high impact work', year: YEAR - 10, journal: 'Big Journal', distance: d(1),
+      pr: 0.25, aa: 0.05, cocite: null, citing: 5, citedBy: 20, authors: [['A8', 'Big Name', 'Big Inst', 'I6']] },
+    ...extra.map(p => ({ ...p, distance: d(p.distance) })),
   ];
   if (multiple) {
     papers.push({ id: 'W6', title: 'Second seed on nerve stimulation', year: YEAR - 3, journal: 'Seed Journal', distance: 1,
@@ -109,6 +116,10 @@ test('title_filter_matches_expected_rows', () => {
     assert.deepEqual(noCovid.sort(), ['W3', 'W4']);
     // The column filter keeps terms off the indexed paper_id column: no title contains "W4".
     assert.deepEqual(run(multiple, 'important', { titleMatch: buildTitleMatch({ all: ['W4'] }) }), []);
+    // A NUL byte in a term is stripped, and the expression still runs and matches.
+    assert.deepEqual(ids(run(multiple, 'important', { titleMatch: buildTitleMatch({ all: ['covid\u0000-19'] }) })), ['W2']);
+    // A punctuation-only term is dropped instead of becoming an empty phrase.
+    assert.deepEqual(ids(run(multiple, 'important', { titleMatch: buildTitleMatch({ all: ['nerve', '-'] }) })).sort(), ['W2', 'W3', 'W4']);
     // Quotes and colons inside terms run without error.
     run(multiple, 'important', { titleMatch: buildTitleMatch({ all: ['vagal "nerve"', 'a:b'] }) });
   }
@@ -119,7 +130,7 @@ test('limit_and_years_applied', () => {
     assert.equal(run(multiple, 'important', { limit: 2 }).length, 2);
     assert.deepEqual(ids(run(multiple, 'important', { limit: 1 })), ['W2']);
     assert.deepEqual(ids(run(multiple, 'important', { yearFrom: YEAR - 1 })).sort(), ['W2', 'W3']);
-    assert.deepEqual(ids(run(multiple, 'important', { yearTo: YEAR - 2 })).sort(), ['W4', 'W5']);
+    assert.deepEqual(ids(run(multiple, 'important', { yearTo: YEAR - 2 })).sort(), ['W4', 'W5', 'W7']);
     assert.deepEqual(ids(run(multiple, 'important', { yearFrom: YEAR - 1, yearTo: YEAR - 1 })), ['W3']);
     assert.equal(run(multiple, 'authors', { limit: 1 }).length, 1);
     assert.equal(run(multiple, 'journals', { limit: 1 }).length, 1);
@@ -132,21 +143,43 @@ test('limit_and_years_applied', () => {
 });
 
 test('multi_seed_uses_distance_2', () => {
-  // Single seed: similar papers come from every distance (W4 is at 2 with a positive Adamic/Adar).
-  assert.deepEqual(ids(run(false, 'similar')), ['W2', 'W3', 'W4']);
-  assert.deepEqual(ids(run(false, 'reviews')).sort(), ['W2', 'W3', 'W4', 'W5']);
+  // Single seed: similar papers come from every distance (W4 is at 2 with a positive Adamic/Adar),
+  // ordered by similarity, not page_rank (W7 has the second-highest page_rank and the lowest similarity).
+  assert.deepEqual(ids(run(false, 'similar')), ['W2', 'W3', 'W4', 'W7']);
+  assert.deepEqual(ids(run(false, 'reviews')).sort(), ['W2', 'W3', 'W4', 'W5', 'W7']);
   // Multi-seed: only distance 2 (the seeds' direct neighbours). W4 moves to distance 3 and drops out
   // although its Adamic/Adar is still positive.
   const multiSimilar = run(true, 'similar');
-  assert.deepEqual(ids(multiSimilar), ['W2', 'W3']);
+  assert.deepEqual(ids(multiSimilar), ['W2', 'W3', 'W7']);
   assert.ok(multiSimilar.every(r => r.distance === 2));
   const multiReviews = run(true, 'reviews');
-  assert.deepEqual(ids(multiReviews).sort(), ['W2', 'W3']);
+  assert.deepEqual(ids(multiReviews).sort(), ['W2', 'W3', 'W7']);
   assert.ok(multiReviews.every(r => r.distance === 2));
   // Rankings by influence still cover farther papers (W4 and W5 are at distance 3 in the multi-seed graph).
-  assert.deepEqual(ids(run(true, 'important')).sort(), ['W2', 'W3', 'W4', 'W5']);
+  assert.deepEqual(ids(run(true, 'important')).sort(), ['W2', 'W3', 'W4', 'W5', 'W7']);
   assert.ok(analysisSql('similar', true, { titleMatch: null, limit: 5 }).includes('p.distance = 2'));
   assert.ok(!analysisSql('similar', false, { titleMatch: null, limit: 5 }).includes('p.distance = 2'));
+});
+
+test('important orders by page_rank, similar by similarity', () => {
+  for (const multiple of [false, true]) assert.deepEqual(ids(run(multiple, 'important', { limit: 3 })), ['W2', 'W7', 'W3']);
+});
+
+test('reviews leave out bulk clusters: more than 8 papers sharing num_citing (> 10), year and journal', () => {
+  const bulk = (n: number, prefix: string): Paper[] => Array.from({ length: n }, (_, i) => ({
+    id: `${prefix}${i}`, title: `Bulk record ${i}`, year: YEAR - 4, journal: 'Bulk Journal', distance: 1,
+    pr: 0.01, aa: 0.01, cocite: null, citing: 60, citedBy: 0, authors: [],
+  }));
+  // Same num_citing and year, another journal: not part of the cluster.
+  const outsider: Paper = { ...bulk(1, 'X')[0]!, id: 'X0', journal: 'Other Journal' };
+  const nine = graph(false, [...bulk(9, 'B'), outsider]);
+  const rows = ids(nine.prepare(analysisSql('reviews', false, { titleMatch: null, limit: 100 })).all());
+  assert.deepEqual(rows.sort(), ['W2', 'W3', 'W4', 'W5', 'W7', 'X0']);
+  // Eight is not a cluster: they stay, ranked first by num_citing.
+  const eight = graph(false, bulk(8, 'B'));
+  const kept = ids(eight.prepare(analysisSql('reviews', false, { titleMatch: null, limit: 100 })).all());
+  assert.equal(kept.filter(id => String(id).startsWith('B')).length, 8);
+  assert.ok(String(kept[0]).startsWith('B'));
 });
 
 test('title filter SQL uses the title_search table function with quotes doubled', () => {

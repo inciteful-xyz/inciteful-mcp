@@ -113,6 +113,14 @@ test('keys_ascii_and_deduped', () => {
   assert.match(out, /^ {2}author = \{Yann LeCun and Geoffrey Hinton\},$/m);
 });
 
+test('bibtex_author_containing_and_stays_one_author', () => {
+  const org = (name: string) => ({ author_position: 'middle', author: { id: null, display_name: name, orcid: null }, institutions: [] });
+  const out = toBibtex([work({ authorships: [org('Yann LeCun'), org('Bill and Melinda Gates Foundation'), org('R&D AND Co'), org('Sandy Andrews')] })]);
+  assert.match(out, /^ {2}author = \{Yann LeCun and \{Bill and Melinda Gates Foundation\} and \{R\\&D AND Co\} and Sandy Andrews\},$/m);
+  // RIS has one line per author, so nothing changes there.
+  assert.ok(toRis([work({ authorships: [org('Bill and Melinda Gates Foundation')] })]).includes('\r\nAU  - Bill and Melinda Gates Foundation\r\n'));
+});
+
 test('no_inciteful_keyword', () => {
   const all = toBibtex([work()]) + toRis([work()]);
   assert.ok(!/inciteful/i.test(all));
