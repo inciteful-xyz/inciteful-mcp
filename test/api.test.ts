@@ -10,7 +10,7 @@ function mock(responses: Array<unknown | Response>) {
     const response = responses.shift();
     return response instanceof Response ? response : Response.json(response);
   };
-  return { api: new ResearchApi({ OPENALEX_API_KEY: 'test-secret' }, fetcher), calls };
+  return { api: new ResearchApi(new URL('https://graph.test'), 1000, { OPENALEX_API_KEY: 'test-secret' }, fetcher), calls };
 }
 
 test('normalizes DOI, OpenAlex, and PMID URLs without conflating numeric IDs', () => {
@@ -91,7 +91,7 @@ test('search passes pagination and filters and returns next cursor', async () =>
 });
 
 test('network errors cannot leak credential-bearing URLs', async () => {
-  const api = new ResearchApi({}, async () => { throw new Error('https://api.openalex.org?api_key=secret'); });
+  const api = new ResearchApi(new URL('https://graph.test'), 1000, {}, async () => { throw new Error('https://api.openalex.org?api_key=secret'); });
   await assert.rejects(api.work('W1'), error => error instanceof ApiError && !error.message.includes('secret'));
 });
 

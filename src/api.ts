@@ -58,17 +58,9 @@ export function compactWork(work: Work) {
 
 export class ResearchApi {
   readonly graphBase: string;
-  readonly timeout: number;
-  constructor(private readonly env: NodeJS.ProcessEnv = process.env, private readonly fetcher: Fetch = fetch) {
-    this.graphBase = env.INCITEFUL_BASE_URL || 'https://graph.incitefulmed.com';
-    const url = new URL(this.graphBase);
-    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
-      throw new Error('INCITEFUL_BASE_URL must be an HTTP(S) URL without credentials, query, or fragment.');
-    }
-    this.timeout = Number(env.REQUEST_TIMEOUT_MS || 45000);
-    if (!Number.isInteger(this.timeout) || this.timeout < 1 || this.timeout > 300000) {
-      throw new Error('REQUEST_TIMEOUT_MS must be an integer between 1 and 300000.');
-    }
+  // The caller supplies the graph URL and timeout; there are no defaults.
+  constructor(graphBase: URL, readonly timeout: number, private readonly env: NodeJS.ProcessEnv, private readonly fetcher: Fetch = fetch) {
+    this.graphBase = graphBase.href;
   }
 
   async request(service: 'OpenAlex' | 'Inciteful', path: string, params: URLSearchParams = new URLSearchParams(), body?: string, asText = false): Promise<unknown> {
@@ -88,7 +80,7 @@ export class ResearchApi {
         body, signal: AbortSignal.timeout(this.timeout), redirect: 'error',
       });
     } catch {
-      throw new ApiError(`${service} request failed or timed out. Check connectivity and REQUEST_TIMEOUT_MS.`);
+      throw new ApiError(`${service} request failed or timed out.`);
     }
     if (!response.ok) {
       const retry = response.headers.get('retry-after');

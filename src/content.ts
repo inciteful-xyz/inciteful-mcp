@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto';
-import { XMLParser, XMLValidator } from 'fast-xml-parser';
 import { z } from 'zod';
 import { ApiError, ResearchApi, normalizeId, safeError, type Fetch, type Work } from './api.js';
 
@@ -22,9 +21,9 @@ export function reconstructAbstract(index: unknown): string | null {
 }
 
 export type ContentLink = {
-  url: string; format: 'pdf' | 'landing_page' | 'tei_xml'; source: string;
+  url: string; format: 'pdf' | 'landing_page'; source: string;
   is_oa: boolean | null; license: string | null; version: string | null;
-  requires_api_key: boolean; priority: number;
+  priority: number;
 };
 
 function publicLink(value: unknown): string | undefined {
@@ -51,20 +50,12 @@ export function contentLinks(work: Work): ContentLink[] {
       source: string(object(location.source).display_name) ?? 'Publisher or repository',
       is_oa: typeof location.is_oa === 'boolean' ? location.is_oa : null,
       license: string(location.license) ?? null, version: string(location.version) ?? null,
-      requires_api_key: false,
     };
     const priority = index === 0 ? 0 : location.is_oa === true ? 10 : 20;
     add(location.pdf_url, { ...base, format: 'pdf', priority });
     add(location.landing_page_url, { ...base, format: 'landing_page', priority: priority + 1 });
   }
-  add(object(work.open_access).oa_url, { source: 'OpenAlex best open-access link', format: 'landing_page', is_oa: true, license: null, version: null, requires_api_key: false, priority: 12 });
-  const workId = normalizeId(work.id);
-  if (/^W\d+$/.test(workId)) for (const [key, extension, format] of [['pdf', 'pdf', 'pdf'], ['grobid_xml', 'grobid-xml', 'tei_xml']] as const) {
-    if (object(work.has_content)[key] === true || string(object(work.content_urls)[key])) {
-      // Build trusted archive URLs from the work ID; never fetch arbitrary metadata URLs with our key.
-      add(`https://content.openalex.org/works/${workId}.${extension}`, { source: 'OpenAlex content archive', format, is_oa: null, license: null, version: null, requires_api_key: true, priority: 30 });
-    }
-  }
+  add(object(work.open_access).oa_url, { source: 'OpenAlex best open-access link', format: 'landing_page', is_oa: true, license: null, version: null, priority: 12 });
   return [...links.values()].sort((a, b) => a.priority - b.priority);
 }
 
@@ -89,31 +80,10 @@ export function parseBioC(data: unknown, abstractOnly = false, expectedId?: stri
   };
 }
 
-export function extractTei(xml: string): string {
-  if (/<!DOCTYPE|<!ENTITY/i.test(xml) || XMLValidator.validate(xml) !== true) throw new ApiError('The archive returned unsupported or malformed XML.');
-  const tree: unknown = new XMLParser({ preserveOrder: true, ignoreAttributes: true, removeNSPrefix: true, parseTagValue: false, trimValues: false }).parse(xml);
-  const find = (node: unknown, name: string): unknown => {
-    if (Array.isArray(node)) { for (const child of node) { const match = find(child, name); if (match !== undefined) return match; } }
-    else if (node && typeof node === 'object') for (const [key, value] of Object.entries(node)) { if (key === name) return value; const match = find(value, name); if (match !== undefined) return match; }
-  };
-  if (find(tree, 'TEI') === undefined || find(tree, 'body') === undefined) throw new ApiError('The archive did not return a TEI article body.');
-  const flatten = (node: unknown): string => {
-    if (Array.isArray(node)) return node.map(flatten).join('');
-    if (node && typeof node === 'object') return Object.entries(node).map(([tag, value]) => {
-      if (tag === '#text') return String(value);
-      return flatten(value) + (/^(p|head|div|ab|row|list|item|figure|table|note|biblStruct)$/.test(tag) ? '\n\n' : tag === 'lb' || tag === 'cell' ? ' ' : '');
-    }).join('');
-    return '';
-  };
-  const text = flatten(find(tree, 'text')).replace(/[ \t]+/g, ' ').replace(/ *\n */g, '\n').replace(/\n{3,}/g, '\n\n').trim();
-  if (!text) throw new ApiError('The archive returned no extractable article text.');
-  return text;
-}
-
 type Article = { text: string; source: string; source_url: string; title?: string; license: string | null; links: ContentLink[] };
 export class PaperContent {
   private readonly cache = new Map<string, { article: Article; expires: number }>();
-  constructor(private readonly api: ResearchApi, private readonly env: NodeJS.ProcessEnv = process.env, private readonly fetcher: Fetch = fetch) {}
+  constructor(private readonly api: ResearchApi, private readonly fetcher: Fetch = fetch) {}
 
   private async download(url: URL): Promise<string> {
     // URLs are constructed from identifiers, never taken from arbitrary publisher metadata.
@@ -182,11 +152,11 @@ export class PaperContent {
 
   async links(id: string) {
     const work = await this.work(id);
-    return { id: work.id, title: work.title, links: contentLinks(work), note: 'These are candidate URLs, not verified downloads. Prefer open-access copies. Publisher/repository links do not require an OpenAlex key; OpenAlex archive downloads do.' };
+    return { id: work.id, title: work.title, links: contentLinks(work), note: 'These are candidate URLs, not verified downloads. Prefer open-access copies.' };
   }
 
-  async fullText(id: string, source: 'auto' | 'pmc' | 'openalex', offset: number, maxChars: number) {
-    const key = `${normalizeId(id)}:${source}`;
+  async fullText(id: string, offset: number, maxChars: number) {
+    const key = normalizeId(id);
     const cached = this.cache.get(key);
     if (cached && cached.expires > Date.now()) return this.page(cached.article, offset, maxChars);
     if (cached) this.cache.delete(key);
@@ -197,25 +167,11 @@ export class PaperContent {
     if (!pmcid && !pmid) try { work = await this.work(id); pmid = work.ids?.pmid ? this.pmid(work.ids.pmid) : undefined; }
     catch (error) { attempts.push(safeError(error)); }
     let article: Article | undefined;
-    if (source !== 'openalex' && (pmcid || pmid)) try {
+    if (pmcid || pmid) try {
       const url = this.bioUrl(pmcid ?? pmid!, true);
       const data = parseBioC(JSON.parse(await this.download(url)), false, pmcid ?? pmid!);
       article = { ...data, source: 'PMC BioC', source_url: url.href, links: work ? contentLinks(work) : [] };
     } catch (error) { attempts.push(`PMC: ${safeError(error)}`); }
-    if (!article && source !== 'pmc') {
-      if (!work && !pmcid) try { work = await this.work(id); } catch (error) { attempts.push(safeError(error)); }
-      if (work) {
-        const archive = contentLinks(work).find(link => link.format === 'tei_xml');
-        if (!archive) attempts.push('OpenAlex does not advertise structured full text for this work.');
-        else if (!this.env.OPENALEX_API_KEY) attempts.push('OpenAlex archive requires OPENALEX_API_KEY; candidate links remain available.');
-        else try {
-          const url = new URL(archive.url);
-          url.searchParams.set('api_key', this.env.OPENALEX_API_KEY);
-          const text = extractTei(await this.download(url));
-          article = { text, source: 'OpenAlex Grobid', source_url: archive.url, title: work.title ?? undefined, license: null, links: contentLinks(work) };
-        } catch (error) { attempts.push(`OpenAlex: ${safeError(error)}`); }
-      }
-    }
     if (!article) return { status: 'not_retrieved', text: null, attempts, links: work ? contentLinks(work) : [],
       reason: 'No readable full text retrieved. The agent can try the candidate publisher/repository PDF or article URLs with its own web tools.' };
     if (this.cache.size >= 8) this.cache.delete(this.cache.keys().next().value!);

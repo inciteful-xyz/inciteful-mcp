@@ -4,7 +4,7 @@ import { ResearchApi, safeError } from './api.js';
 import { MAX_REVIEW_SEEDS, reviewOptionsSchema } from './review.js';
 import { PaperContent } from './content.js';
 
-export function createServer(api = new ResearchApi()) {
+export function createServer(api: ResearchApi) {
   const content = new PaperContent(api);
   const server = new McpServer({ name: 'inciteful-mcp', version: '0.1.0' });
   const id = z.string().trim().min(1).max(500).describe('DOI, OpenAlex W ID/URL, PMID, or an Inciteful-supported identifier.');
@@ -53,13 +53,13 @@ export function createServer(api = new ResearchApi()) {
     inputSchema: { id: contentId }, annotations,
   }, ({ id }) => run(() => content.abstract(id)));
   server.registerTool('get_full_text_links', {
-    description: 'Return potential full-text PDF and article URLs from OpenAlex, ordered with its best open-access copy first. Includes license/version/access metadata and archive URLs. Use your web tools to fetch publisher or repository links; availability is not guaranteed.',
+    description: 'Return potential full-text PDF and article URLs from OpenAlex, ordered with its best open-access copy first. Includes license/version/access metadata. Use your web tools to fetch publisher or repository links; availability is not guaranteed.',
     inputSchema: { id }, annotations,
   }, ({ id }) => run(() => content.links(id)));
   server.registerTool('get_full_text', {
-    description: 'Fetch readable article text from PMC BioC, or OpenAlex structured XML when an API key is configured (archive download charges may apply). Returns chunks with next_offset and content hash. If retrieval fails, returns candidate URLs for the agent to fetch with web/PDF tools. Does not scrape arbitrary publisher sites.',
-    inputSchema: { id: contentId, source: z.enum(['auto', 'pmc', 'openalex']).default('auto'),
+    description: 'Fetch readable article text from PMC BioC. Returns chunks with next_offset and content hash. If retrieval fails, returns candidate URLs for the agent to fetch with web/PDF tools. Does not scrape arbitrary publisher sites.',
+    inputSchema: { id: contentId,
       offset: z.number().int().min(0).default(0), max_chars: z.number().int().min(1).max(50000).default(15000) }, annotations,
-  }, ({ id, source, offset, max_chars }) => run(() => content.fullText(id, source, offset, max_chars)));
+  }, ({ id, offset, max_chars }) => run(() => content.fullText(id, offset, max_chars)));
   return server;
 }
