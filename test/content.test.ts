@@ -1,34 +1,34 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
-import { ResearchApi, type Fetch, type Work } from '../src/api.js';
-import { PaperContent, contentLinks, parseBioC, reconstructAbstract } from '../src/content.js';
+import { ContentClient, contentLinks, parseBioC } from '../src/content.js';
+import { compactWork, type Work } from '../src/openalex.js';
 
+// Shape as served by pmcoa.cgi/BioC_json/PMC4373434/unicode on 2026-10-30, text shortened.
 const bio = [{ documents: [{ id: 'PMC1', infons: { license: 'CC BY' }, passages: [
-  { text: 'A study', infons: { section_type: 'TITLE', 'article-id_pmid': '1' } },
+  { text: 'A study', infons: { section_type: 'TITLE', 'article-id_pmid': '1', 'article-id_pmc': 'PMC1' } },
   { text: 'An abstract.', infons: { section_type: 'ABSTRACT' } },
   { text: 'Introduction with actual body text.', infons: { section_type: 'INTRO' } },
   { text: 'Methods and results.', infons: { section_type: 'METHODS' } },
 ] }] }];
 
-const work: Work = {
-  id: 'https://openalex.org/W1', doi: 'https://doi.org/10.1234/example', ids: { pmid: 'https://pubmed.ncbi.nlm.nih.gov/1/' },
+const work: Work = compactWork({
+  id: 'https://openalex.org/W1', doi: 'https://doi.org/10.1234/example',
+  ids: { pmid: 'https://pubmed.ncbi.nlm.nih.gov/1', pmcid: 'https://www.ncbi.nlm.nih.gov/pmc/articles/1' },
   best_oa_location: { pdf_url: 'https://repository.example/paper.pdf', landing_page_url: 'https://repository.example/paper', is_oa: true, license: 'cc-by', version: 'acceptedVersion', source: { display_name: 'Repository' } },
   locations: [{ pdf_url: 'https://repository.example/paper.pdf', is_oa: true }, { landing_page_url: 'https://publisher.example/paper', is_oa: false }],
-  has_content: { grobid_xml: true, pdf: true },
-};
+})!;
+const noPmc: Work = { ...work, ids: { pmid: '1', pmcid: null } };
 
-function setup(data: Work = work, download?: Fetch) {
-  const api = new ResearchApi(new URL('https://graph.test'), 1000, {}, async () => Response.json(data));
-  return new PaperContent(api, download ?? (async () => Response.json(bio)));
+function fake(handler: (url: URL) => Response | Promise<Response>) {
+  const urls: URL[] = [];
+  const fetcher = (async (input: string | URL | Request) => {
+    const url = new URL(String(input));
+    urls.push(url);
+    return handler(url);
+  }) as typeof fetch;
+  return { fetcher, urls };
 }
-
-test('reconstructs abstract positions and repeated tokens without relying on key order', () => {
-  assert.equal(reconstructAbstract({ paper: [2], The: [0], describes: [3], new: [1, 4], methods: [5] }), 'The new paper describes new methods');
-  assert.equal(reconstructAbstract(null), null);
-  assert.throws(() => reconstructAbstract({ word: [1000000] }), /invalid/);
-  assert.throws(() => reconstructAbstract({ word: [2] }), /incomplete/);
-  assert.throws(() => reconstructAbstract({ a: [0], b: [0] }), /conflicting/);
-});
 
 test('full-text links rank OA copies, preserve provenance and deduplicate URLs', () => {
   const links = contentLinks(work);
@@ -38,36 +38,43 @@ test('full-text links rank OA copies, preserve provenance and deduplicate URLs',
   assert.ok(links.some(l => l.is_oa === false));
 });
 
-test('full-text links never point at the paid OpenAlex content archive', () => {
-  const links = contentLinks({ ...work, content_urls: { pdf: 'https://content.openalex.org/works/W1.pdf' } });
-  assert.deepEqual(links.filter(l => l.url.includes('content.openalex.org')), []);
-});
-
-test('OpenAlex abstract is returned without a content download', async () => {
-  const content = setup({ ...work, abstract_inverted_index: { My: [0], abstract: [1] } }, async () => { throw new Error('Must not download'); });
-  assert.equal((await content.abstract('W1')).text, 'My abstract');
-});
-
-test('missing OpenAlex abstract falls back to PubMed BioC', async () => {
-  let url = '';
-  const content = setup(work, async input => { url = String(input); return Response.json(bio); });
-  const result = await content.abstract('pmid:1');
-  assert.equal(result.text, 'An abstract.');
-  assert.match(url, /pubmed\.cgi\/BioC_json\/1\/unicode/);
+test('no_openalex_archive_links', async () => {
+  const archived = compactWork({
+    id: 'https://openalex.org/W1', content_urls: { pdf: 'https://content.openalex.org/works/W1.pdf' }, has_content: { pdf: true },
+    best_oa_location: { pdf_url: 'https://content.openalex.org/works/W1.pdf', landing_page_url: 'https://repository.example/paper', is_oa: true },
+    locations: [{ pdf_url: 'https://CONTENT.openalex.org/works/W1.pdf?x=1', is_oa: true }],
+    open_access: { is_oa: true, oa_url: 'https://content.openalex.org/works/W1.pdf' },
+  })!;
+  const links = contentLinks(archived);
+  assert.deepEqual(links.map(l => l.url), ['https://repository.example/paper']);
+  const { fetcher, urls } = fake(() => { throw new Error('no download expected'); });
+  const result = await new ContentClient(fetcher).readPaper(archived, 0, 100);
+  assert.equal(urls.length, 0);
+  assert.equal(result.links.some(l => new URL(l.url).hostname.endsWith('openalex.org')), false);
 });
 
 test('PMC full text is paginated without losing content or repeating downloads', async () => {
-  let calls = 0;
-  const content = setup(work, async () => { calls++; return Response.json(bio); });
-  const first = await content.fullText('PMC1', 0, 10);
-  assert.equal(first.status, 'available');
-  if (!('next_offset' in first)) throw new Error('Expected page');
-  const second = await content.fullText('PMC1', first.next_offset!, 50000);
-  assert.equal(first.text + second.text, parseBioC(bio).text);
-  assert.equal(calls, 1);
+  const { fetcher, urls } = fake(() => Response.json(bio));
+  const content = new ContentClient(fetcher);
+  const first = await content.readPaper(work, 0, 10);
+  assert.equal(first.text, parseBioC(bio).text.slice(0, 10));
+  assert.equal(first.nextOffset, 10);
+  const second = await content.readPaper(work, first.nextOffset!, 50000);
+  assert.equal(first.text! + second.text!, parseBioC(bio).text);
+  assert.equal(second.nextOffset, null);
+  assert.equal(urls.length, 1);
+  assert.equal(urls[0].href, 'https://www.ncbi.nlm.nih.gov/research/bionlp/RESTful/pmcoa.cgi/BioC_json/PMC1/unicode');
   assert.equal(first.license, 'CC BY');
-  if (!('content_sha256' in second)) throw new Error('Expected page');
-  assert.equal(first.content_sha256, second.content_sha256);
+  assert.equal(first.sha256, createHash('sha256').update(parseBioC(bio).text).digest('hex'));
+  assert.equal(first.sha256, second.sha256);
+  assert.ok(first.links.length > 0);
+});
+
+test('an offset past the end returns no more text', async () => {
+  const content = new ContentClient(fake(() => Response.json(bio)).fetcher);
+  const result = await content.readPaper(work, 1_000_000, 10);
+  assert.equal(result.text, '');
+  assert.equal(result.nextOffset, null);
 });
 
 test('abstract-only and wrong-article responses are not mislabeled as full text', () => {
@@ -75,16 +82,29 @@ test('abstract-only and wrong-article responses are not mislabeled as full text'
   assert.throws(() => parseBioC(bio, false, 'PMC2'), /different article/);
 });
 
-test('a work without PMC text returns candidate links rather than pretending to retrieve text', async () => {
-  const content = setup({ ...work, ids: {} }, async () => { throw new Error('No download expected'); });
-  const result = await content.fullText('W1', 0, 100);
-  assert.equal(result.status, 'not_retrieved');
+test('a work without a PMCID returns candidate links without downloading', async () => {
+  const { fetcher, urls } = fake(() => { throw new Error('No download expected'); });
+  const result = await new ContentClient(fetcher).readPaper(noPmc, 0, 100);
+  assert.equal(urls.length, 0);
+  assert.equal(result.text, undefined);
+  assert.equal(result.nextOffset, null);
+  assert.equal(result.license, null);
   assert.ok(result.links.length > 0);
 });
 
-test('downloads are bounded', async () => {
-  const content = setup(work, async () => new Response('large', { headers: { 'content-length': String(13 * 1024 * 1024) } }));
-  const result = await content.fullText('W1', 0, 100);
-  assert.equal(result.status, 'not_retrieved');
-  assert.match(JSON.stringify(result), /12 MiB/);
+test('failed or unusable PMC responses fall back to candidate links', async () => {
+  const responses: Array<() => Response> = [
+    () => new Response('large', { headers: { 'content-length': String(13 * 1024 * 1024) } }),
+    () => new Response('', { status: 404 }),
+    () => new Response('[Error] : No result can be found.'),
+    () => Response.json([{ documents: [{ ...bio[0].documents[0], id: 'PMC999', passages: [{ text: 'Body', infons: { section_type: 'INTRO' } }] }] }]),
+  ];
+  for (const respond of responses) {
+    const result = await new ContentClient(fake(respond).fetcher).readPaper(work, 0, 100);
+    assert.equal(result.text, undefined);
+    assert.equal(result.nextOffset, null);
+    assert.ok(result.links.length > 0);
+  }
+  const rejected = await new ContentClient(fake(() => { throw new TypeError('fetch failed'); }).fetcher).readPaper(work, 0, 100);
+  assert.equal(rejected.text, undefined);
 });

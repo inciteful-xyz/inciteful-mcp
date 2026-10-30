@@ -1,4 +1,4 @@
-// Upstream failures with fixed messages. None carries a URL, a key or upstream response text,
+// Upstream failures with fixed messages. No message carries a URL, a key or upstream response text,
 // so a message or `err.name` is always safe to return to a client or write to a log.
 
 export class GraphUnavailableError extends Error {
@@ -6,9 +6,13 @@ export class GraphUnavailableError extends Error {
   constructor(readonly retryAfterSecs: number | null) { super('The citation graph service is temporarily unavailable.'); }
 }
 
+/**
+ * `detail` is graph-api's body text for a 400: the SQL error the client needs to fix its query.
+ * It is upstream text, so it is never written to a log; it holds no URL or key.
+ */
 export class GraphError extends Error {
   override readonly name = 'GraphError';
-  constructor(readonly status: number) { super('The citation graph service returned an error.'); }
+  constructor(readonly status: number, readonly detail: string | null = null) { super('The citation graph service returned an error.'); }
 }
 
 export class QueryTimeoutError extends Error {
