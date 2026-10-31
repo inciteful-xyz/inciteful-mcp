@@ -11,7 +11,7 @@ import {
 } from './errors.js';
 import type { ConnectorPaper, GraphClient, SimilarPaper } from './graph.js';
 import {
-  GRACE_MS, MAX_ANALYSIS_LIMIT, MAX_PAPER_IDS, MAX_QUERY_CHARS, MAX_READ_CHARS, MAX_SEARCH_LIMIT, MAX_SEEDS, MAX_SQL_CHARS, MAX_SQL_LIMIT,
+  GRACE_MS, MAX_ANALYSIS_LIMIT, MAX_ID_CHARS, MAX_PAPER_IDS, MAX_QUERY_CHARS, MAX_READ_CHARS, MAX_SEARCH_LIMIT, MAX_SEEDS, MAX_SQL_CHARS, MAX_SQL_LIMIT,
   METADATA_WAIT_MS, OUTPUT_CAP_BYTES, TOOL_CEILING_MS, URL_SEED_CAP,
 } from './limits.js';
 import { countOpenAlexRequests, type OpenAlexClient, type Work } from './openalex.js';
@@ -177,7 +177,7 @@ type ToolName = keyof typeof outputs;
 // ---------------------------------------------------------------------------------------------
 // Inputs
 
-const idString = z.string().trim().min(1);
+const idString = z.string().trim().min(1).max(MAX_ID_CHARS);
 const idList = z.array(idString).min(1).max(MAX_PAPER_IDS);
 const seeds = z.array(idString).min(1).max(MAX_SEEDS)
   .describe(`1–${MAX_SEEDS} seed papers: DOIs, OpenAlex IDs (W…) or PMIDs. Duplicates count once.`);

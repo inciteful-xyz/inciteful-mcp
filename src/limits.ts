@@ -24,6 +24,8 @@ export const MAX_SQL_LIMIT = 500;
 /** Characters in `query_citation_graph`'s `sql` and `search_literature`'s `query`. */
 export const MAX_SQL_CHARS = 10_000;
 export const MAX_QUERY_CHARS = 1_000;
+/** Characters in one paper id or seed (a DOI, OpenAlex ID, PMID or PMCID). */
+export const MAX_ID_CHARS = 300;
 /** `read_paper`'s `max_chars`. */
 export const MAX_READ_CHARS = 50_000;
 /** Serialized result size (`Buffer.byteLength` of the JSON) above which rows are trimmed. */

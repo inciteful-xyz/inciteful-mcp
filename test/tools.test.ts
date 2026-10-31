@@ -989,3 +989,29 @@ test('error_mapping_after_review', async () => {
     assert.equal(sc.diagnostics.advisories.filter((a: string) => a.startsWith('Seed "')).length, 0);
   });
 });
+
+test('id_length_bounded', async () => {
+  await withClient({}, async ({ call }) => {
+    const long = `10.1/${'x'.repeat(296)}`;
+    assert.equal(long.length, 301);
+    for (const [name, args] of [
+      ['get_papers', { ids: [long] }], ['find_similar_papers', { seeds: [long] }],
+      ['connect_papers', { from: 'W1', to: long }], ['read_paper', { id: long }],
+    ] as Array<[string, Record<string, unknown>]>) {
+      assert.match(text(await call(name, args)), /Input validation error/, name);
+    }
+    assert.ok(!(await call('get_papers', { ids: [long.slice(1)] })).isError, '300 characters is allowed');
+  });
+});
+
+test('metadata_deadline_never_exceeds_the_call_deadline', async () => {
+  // The clock jumps to NOW + 88 s once the query has run, so now + 5 s would pass the call's deadline.
+  let late = false;
+  const now = () => new Date(NOW.getTime() + (late ? 88_000 : 0));
+  const query = async () => { late = true; return [{ paper_id: 'W9' }]; };
+  await withClient({ now, query }, async ({ call, calls }) => {
+    await call('explore_citation_network', { seeds: ['W1'], analysis: 'important' });
+    const metadata = calls.cap.find(c => JSON.parse(c.key)[0] === 'metadata')!;
+    assert.equal(metadata.deadlineAt, NOW.getTime() + 90_000);
+  });
+});
