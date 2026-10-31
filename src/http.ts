@@ -28,10 +28,15 @@ const CORS_PREFLIGHT = {
 
 /**
  * Served asset names → file in `assetsDir` and its type. Only these names are served, so no request
- * path ever reaches the file system. Task 7 adds the page assets.
+ * path ever reaches the file system. `example.json` is read by the landing page, not served.
  */
 export const ASSETS: Readonly<Record<string, { file: string; type: string }>> = {
   'favicon.svg': { file: 'favicon.svg', type: 'image/svg+xml' },
+  'icon.png': { file: 'icon.png', type: 'image/png' },
+  'og.png': { file: 'og.png', type: 'image/png' },
+  'dm-sans-latin-wght-normal.woff2': { file: 'dm-sans-latin-wght-normal.woff2', type: 'font/woff2' },
+  'dm-sans-latin-ext-wght-normal.woff2': { file: 'dm-sans-latin-ext-wght-normal.woff2', type: 'font/woff2' },
+  'DM-Sans-OFL.txt': { file: 'DM-Sans-OFL.txt', type: 'text/plain; charset=utf-8' },
 };
 const ASSET_CACHE = 'public, max-age=31536000, immutable';
 

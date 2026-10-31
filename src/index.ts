@@ -11,8 +11,8 @@ import { GraphClient } from './graph.js';
 import { createApp, drain, recordToolCalls, trackInFlight } from './http.js';
 import { BUILD_CAP, BuildCap, RATE_LIMIT_PER_MINUTE, RateLimiter, VENDOR_RANGES, VENDOR_RATE_LIMIT_PER_MINUTE } from './limits.js';
 import { OpenAlexClient } from './openalex.js';
+import { pages } from './pages/index.js';
 import { createServerFactory } from './tools.js';
-import type { Pages } from './types.js';
 import { UsageLog } from './usage.js';
 
 const HOST = '0.0.0.0';
@@ -21,14 +21,6 @@ const PORT = 8080;
 const DRAIN_TIMEOUT_MS = 90_000;
 const VERSION = (JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }).version;
 const ASSETS_DIR = fileURLToPath(new URL('../assets/', import.meta.url));
-
-// TODO(Task 7): replace with the real landing, privacy, terms and 404 pages.
-const placeholderPages: Pages = {
-  landing: () => '<!doctype html><title>Inciteful academic MCP</title><h1>Inciteful academic MCP</h1>',
-  privacy: () => '<!doctype html><title>Privacy</title><h1>Privacy</h1>',
-  terms: () => '<!doctype html><title>Terms</title><h1>Terms</h1>',
-  notFound: () => '<!doctype html><title>Not found</title><h1>Not found</h1>',
-};
 
 let config: Config;
 try {
@@ -57,7 +49,7 @@ const handler = createMcpHandler(factory, { responseMode: 'sse', keepAliveMs: 15
 await graph.resolve([]).catch(() => {});
 
 const tracked = trackInFlight(createApp({
-  config, mcp: handler, pages: placeholderPages, graphMeta: () => graph.lastMeta, limiter, usage, assetsDir: ASSETS_DIR,
+  config, mcp: handler, pages, graphMeta: () => graph.lastMeta, limiter, usage, assetsDir: ASSETS_DIR,
 }));
 const server = createServer(tracked.listener);
 server.listen(PORT, HOST, () => {

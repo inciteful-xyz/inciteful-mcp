@@ -26,8 +26,8 @@ export type ProvenanceInput = {
 
 export type Diagnostics = { advisories: string[]; unresolved_seeds: Array<{ input: string; reason: string }> };
 
-/** Spec §4.4 coverage texts, chosen by whether the recent tier is live. */
-function coverageNote(snapshot: string | null, recentTier: string | null): string {
+/** Spec §4.4 coverage texts, chosen by whether the recent tier is live. The landing page shows the same text. */
+export function coverageNote(snapshot: string | null, recentTier: string | null): string {
   if (recentTier === null) {
     return "The graph is built from the snapshot. Papers newer than the snapshot are looked up live only when named explicitly; they don't appear as neighbours.";
   }
