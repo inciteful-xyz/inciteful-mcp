@@ -614,6 +614,21 @@ test('query errors map to tool errors', async () => {
     const r = await call('find_similar_papers', { seeds: ['W1'] });
     assert.equal(text(r), 'The citation graph service is temporarily unavailable; retry shortly.');
   });
+  // graph-api's budget gate: a 503 whose Retry-After runs to the daily reset (over 10 minutes).
+  // 18:02:11 + 600 s is still the plain message; + 21_468 s is 23:59:59, said as the next minute.
+  await withClient({ resolve: async () => { throw new GraphUnavailableError(600); } }, async ({ call }) => {
+    const r = await call('find_similar_papers', { seeds: ['W1'] });
+    assert.equal(text(r), 'The citation graph service is temporarily unavailable; retry in about 600 seconds.');
+  });
+  await withClient({ resolve: async () => { throw new GraphUnavailableError(21_468); } }, async ({ call, settled }) => {
+    const r = await call('find_similar_papers', { seeds: ['W1'] });
+    assert.equal(text(r), 'OpenAlex lookups for new papers are paused until about 00:00 UTC; papers already in the graph still work.');
+    assert.equal(settled[0].outcome, 'upstream_unavailable');
+  });
+  await withClient({ resolve: async () => { throw new GraphUnavailableError(601); } }, async ({ call }) => {
+    const r = await call('find_similar_papers', { seeds: ['W1'] });
+    assert.equal(text(r), 'OpenAlex lookups for new papers are paused until about 18:13 UTC; papers already in the graph still work.');
+  });
   await withClient({ resolve: async () => { throw new TypeError('fetch failed: http://graph-api-academic/openalex?ids[]=W1'); } }, async ({ call }) => {
     const r = await call('find_similar_papers', { seeds: ['W1'] });
     assert.equal(text(r), 'The tool failed unexpectedly.');

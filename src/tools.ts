@@ -57,6 +57,16 @@ class ToolFailure extends Error {
 /** A call past its ceiling, whether a build or other upstream work was still running. */
 const DEADLINE_MESSAGE = 'Still working upstream; retry in about a minute.';
 
+/**
+ * A graph-api 503 waiting longer than this is its OpenAlex budget gate, closed until the daily reset,
+ * not an outage: papers already in the graph still work.
+ */
+const BUDGET_GATE_SECS = 600;
+
+/** `now + secs` as HH:MM UTC, rounded up to the minute so it is never early. */
+const utcTimeAfter = (now: Date, secs: number) =>
+  new Date(Math.ceil((now.getTime() + secs * 1000) / 60_000) * 60_000).toISOString().slice(11, 16);
+
 const retryIn = (secs: number | null) => (secs === null ? 'retry shortly' : `retry in about ${secs} seconds`);
 
 /**
@@ -64,13 +74,17 @@ const retryIn = (secs: number | null) => (secs === null ? 'retry shortly' : `ret
  * own text (`ToolFailure`, which for `query_citation_graph` may carry graph-api's error about the
  * caller's own SQL). Nothing here carries a URL or a key, and nothing is logged.
  */
-function describeError(err: unknown): { message: string; outcome: ToolOutcome } {
+function describeError(err: unknown, now: Date): { message: string; outcome: ToolOutcome } {
   if (err instanceof ToolFailure) return { message: err.message, outcome: err.outcome };
   if (err instanceof TitleFilterError) return { message: err.message, outcome: 'tool_error' };
   if (err instanceof QueryTimeoutError) {
     return { message: "The query hit graph-api's time limit; simplify it or add a LIMIT/WHERE.", outcome: 'timeout' };
   }
   if (err instanceof BuildDeadlineError) return { message: DEADLINE_MESSAGE, outcome: 'timeout' };
+  if (err instanceof GraphUnavailableError && err.retryAfterSecs !== null && err.retryAfterSecs > BUDGET_GATE_SECS) {
+    const until = utcTimeAfter(now, err.retryAfterSecs);
+    return { message: `OpenAlex lookups for new papers are paused until about ${until} UTC; papers already in the graph still work.`, outcome: 'upstream_unavailable' };
+  }
   if (err instanceof GraphUnavailableError) {
     return { message: `The citation graph service is temporarily unavailable; ${retryIn(err.retryAfterSecs)}.`, outcome: 'upstream_unavailable' };
   }
@@ -442,7 +456,7 @@ export function createServerFactory(deps: ToolDeps): McpServerFactory {
           result = { content: [{ type: 'text', text: JSON.stringify(value) }], structuredContent: value };
           outcome = 'ok';
         } catch (err) {
-          const { message, outcome: o } = ac.signal.aborted ? { message: DEADLINE_MESSAGE, outcome: 'timeout' as const } : describeError(err);
+          const { message, outcome: o } = ac.signal.aborted ? { message: DEADLINE_MESSAGE, outcome: 'timeout' as const } : describeError(err, deps.now());
           result = { content: [{ type: 'text', text: message }], isError: true };
           outcome = o;
         } finally {
