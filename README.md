@@ -117,9 +117,11 @@ Every citation-graph result names the method that ranked it and carries a proven
 
 Title filters match paper titles only, not abstracts or full text. Very highly cited papers aren't expanded, which keeps graphs a usable size; the result says how many were skipped. Per-caller rate limits apply.
 
-## Privacy
+## Privacy and security
 
 What we keep and who receives data: https://incitefulmed.com/academic/mcp/privacy · Terms: https://incitefulmed.com/academic/mcp/terms
+
+The server is public, takes no credentials and sends `Access-Control-Allow-Origin: *`, so any web page may call it. Browser requests from any `https:` origin are accepted, as are `http://localhost`, `http://127.0.0.1` and `http://[::1]` on any port (MCP Inspector and other local tools). Any other `Origin`, including `null`, gets HTTP 403. Requests without an `Origin` header, as most MCP clients send them, are unaffected.
 
 ## This repository
 

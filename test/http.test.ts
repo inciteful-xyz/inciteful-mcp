@@ -10,7 +10,7 @@ import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/cli
 import { createMcpHandler, McpServer, type McpHttpHandler } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { loadConfig } from '../src/config.js';
-import { ASSETS, createApp, shutdown, trackInFlight } from '../src/http.js';
+import { ASSETS, createApp, originAllowed, shutdown, trackInFlight } from '../src/http.js';
 import { pages as realPages } from '../src/pages/index.js';
 import type { RateLimiter } from '../src/limits.js';
 import type { GraphMeta, PageCtx, Pages, UsageRow } from '../src/types.js';
@@ -132,6 +132,44 @@ test('options_preflight_cors', async () => {
     }
     assert.deepEqual(calls.limiter, []);
     assert.equal(calls.mcp.length, 0);
+  });
+});
+
+test('origin_allowed_rules', () => {
+  for (const origin of ['https://claude.ai', 'https://chatgpt.com', 'https://claude.ai:8443', 'http://localhost:6274', 'http://localhost',
+    'http://127.0.0.1:6274', 'http://[::1]:6274']) {
+    assert.equal(originAllowed(origin), true, origin);
+  }
+  for (const origin of ['null', 'http://evil.example', 'not a url', '', 'http://localhost.evil', 'http://127.0.0.2', 'https://claude.ai/path',
+    'https://claude.ai?x=1', 'https://user@claude.ai', 'file:///etc/passwd', 'data:text/html,x', 'ws://localhost', 'https://a.example, https://b.example']) {
+    assert.equal(originAllowed(origin), false, origin);
+  }
+});
+
+test('invalid_origin_403_before_the_limiter', async () => {
+  await withApp({}, async ({ port, calls }) => {
+    for (const origin of ['null', 'http://evil.example', 'not a url']) {
+      const r = await raw(port, 'POST', '/academic/mcp', { ...POST_HEADERS, origin }, POST_BODY);
+      assert.equal(r.status, 403, origin);
+      assert.equal(r.headers['content-type'], 'application/json');
+      assert.equal(r.headers['cache-control'], 'no-store, no-transform');
+      assert.equal(r.headers['access-control-allow-origin'], '*');
+      assert.equal(r.headers['x-robots-tag'], 'noindex');
+      assert.deepEqual(JSON.parse(r.body), { jsonrpc: '2.0', error: { code: -32000, message: 'Origin not allowed.' } });
+      const pre = await raw(port, 'OPTIONS', '/academic/mcp', { origin, 'access-control-request-method': 'POST' });
+      assert.equal(pre.status, 403, `preflight ${origin}`);
+      assert.equal(pre.headers['access-control-allow-methods'], undefined);
+    }
+    assert.deepEqual(calls.limiter, []);
+    assert.deepEqual(calls.rejections, []);
+    assert.equal(calls.mcp.length, 0);
+    for (const origin of ['https://claude.ai', 'http://localhost:6274', undefined]) {
+      const headers = origin === undefined ? POST_HEADERS : { ...POST_HEADERS, origin };
+      assert.equal((await raw(port, 'POST', '/academic/mcp', headers, POST_BODY)).status, 200, String(origin));
+      const pre = await raw(port, 'OPTIONS', '/academic/mcp', origin === undefined ? {} : { origin, 'access-control-request-method': 'POST' });
+      assert.equal(pre.status, 204, `preflight ${origin}`);
+    }
+    assert.equal(calls.mcp.length, 3);
   });
 });
 
