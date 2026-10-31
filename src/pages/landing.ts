@@ -261,8 +261,8 @@ ${example()}
 <section class="sec"><div class="wrap">
 <h2>FAQ</h2>
 <details open><summary>Is this the same Inciteful as inciteful.xyz?</summary><p>Yes. Inciteful now lives at incitefulmed.com/academic. The web app, the graph and the methods are unchanged, and it’s still free.</p></details>
-<details><summary>Who builds it, and why is it free?</summary><p>The team behind Inciteful and Inciteful Med builds it. Inciteful has been free since it started; the MCP server runs on the same citation graph service as the web app, and fair-use limits keep the cost manageable.</p></details>
-<details><summary>Why is it on a medical domain?</summary><p>Inciteful Academic moved to incitefulmed.com/academic, next to Inciteful Med. The graph covers every field in OpenAlex, not just medicine.</p></details>
+<details><summary>Who builds it, and why is it free?</summary><p>The team behind Inciteful and <a href="${esc(l.site)}">Inciteful Med</a> builds it. Inciteful has been free since it started; the MCP server runs on the same citation graph service as the web app, and fair-use limits keep the cost manageable.</p></details>
+<details><summary>Why is it on a medical domain?</summary><p>Inciteful Academic moved to incitefulmed.com/academic, next to <a href="${esc(l.site)}">Inciteful Med</a>. The graph covers every field in OpenAlex, not just medicine.</p></details>
 <details><summary>Which assistants work?</summary><p>Claude (web, desktop, mobile and Claude Code), ChatGPT where your plan allows custom MCP servers, Cursor, VS Code, and any client that supports remote MCP over Streamable HTTP.</p></details>
 <details><summary>My assistant didn’t use Inciteful.</summary><p>Name it in your prompt, for example “Using Inciteful…”. Assistants often default to web search.</p></details>
 <details><summary>Why are some recent papers missing?</summary><p>${esc(coverageNote(ctx.snapshot, ctx.recentTier))}</p></details>
