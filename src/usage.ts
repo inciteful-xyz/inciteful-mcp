@@ -141,6 +141,11 @@ export class UsageLog implements UsageSink {
     }
   }
 
+  /** Whether the DB opened. Startup exits when it didn't; later failures never throw. */
+  get isOpen(): boolean {
+    return this.db !== null;
+  }
+
   /** Stops the timers, writes every pending minute (the current one too) and closes the DB. */
   close(): void {
     for (const t of this.timers) clearInterval(t);

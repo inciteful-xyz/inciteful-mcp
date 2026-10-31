@@ -1,4 +1,4 @@
-// Entry point: config, clients, usage log, MCP handler, HTTP server on 0.0.0.0:8080, SIGTERM drain.
+// Entry point: config, clients, usage log, MCP handler, HTTP server on 0.0.0.0:8080, SIGTERM/SIGINT drain.
 // Output is startup lines and fixed warnings only; nothing here prints request data or config values.
 
 import { readFileSync } from 'node:fs';
@@ -35,6 +35,12 @@ const graph = new GraphClient(config);
 const openalex = new OpenAlexClient(config.openalexKey);
 const content = new ContentClient();
 const usage = new UsageLog(config.usageDbPath, { now: () => new Date() });
+// A path that can't be opened is a deploy error: fail now, not run for weeks without a usage log.
+// UsageLog has already warned with the error kind; this line names the variable, never its value.
+if (!usage.isOpen) {
+  console.error('usage log: cannot open USAGE_DB_PATH; exiting');
+  process.exit(1);
+}
 const buildCap = new BuildCap(BUILD_CAP);
 const limiter = new RateLimiter({
   perMinute: RATE_LIMIT_PER_MINUTE, vendorPerMinute: VENDOR_RATE_LIMIT_PER_MINUTE, vendorRanges: VENDOR_RANGES, now: Date.now,
@@ -56,11 +62,13 @@ server.listen(PORT, HOST, () => {
   console.log(`inciteful-mcp ${VERSION} listening on ${HOST}:${PORT}`);
 });
 
+// SIGTERM from Kubernetes and docker stop; SIGINT for Ctrl-C in a local `docker run -it` (as PID 1,
+// node has no default action for either).
 let stopping = false;
-process.on('SIGTERM', () => {
+const onStop = (signal: NodeJS.Signals) => {
   if (stopping) return;
   stopping = true;
-  console.log('SIGTERM: draining');
+  console.log(`${signal}: draining`);
   void (async () => {
     const finished = await drain(server, tracked, DRAIN_TIMEOUT_MS).catch(() => false);
     if (!finished) console.warn('drain timed out; closing open connections');
@@ -68,4 +76,6 @@ process.on('SIGTERM', () => {
     usage.close();
     process.exit(0);
   })();
-});
+};
+process.on('SIGTERM', onStop);
+process.on('SIGINT', onStop);

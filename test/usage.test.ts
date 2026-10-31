@@ -271,6 +271,7 @@ test('db_failure_does_not_throw', (t) => {
 
   // Open fails: one warning naming the error kind only, and every method is a no-op.
   const broken = new UsageLog(unwritable, { now: clock.now });
+  assert.equal(broken.isOpen, false);
   broken.record(row());
   broken.recordRejection(IP);
   broken.flush();
@@ -284,6 +285,7 @@ test('db_failure_does_not_throw', (t) => {
   warn.mock.resetCalls();
   const path = dbPath();
   const log = new UsageLog(path, { now: clock.now });
+  assert.equal(log.isOpen, true);
   const other = new DatabaseSync(path);
   other.exec('DROP TABLE usage');
   other.close();
@@ -294,6 +296,7 @@ test('db_failure_does_not_throw', (t) => {
   log.flush();
   assert.equal(log.purge(), 0);
   log.close();
+  assert.equal(log.isOpen, false);
   const messages = warn.mock.calls.map((c) => c.arguments.join(' '));
   assert.deepEqual(messages, [
     'usage log: write failed (ERR_SQLITE_ERROR)',
