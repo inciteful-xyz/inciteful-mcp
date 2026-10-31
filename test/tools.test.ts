@@ -239,13 +239,22 @@ test('descriptions carry the required facts', async () => {
       'distance 0', 'ror.organizations', 'title_terms', 'metadata', 'OFFSET', 'single SELECT', "the query's trailing LIMIT"]) {
       assert.ok(q.includes(fact), `query_citation_graph mentions ${fact}`);
     }
-    assert.equal(QUERY_EXAMPLES.length, 3);
+    assert.equal(QUERY_EXAMPLES.length, 2);
     for (const sql of QUERY_EXAMPLES) assert.ok(q.includes(sql), 'example in the description');
     assert.match(d.explore_citation_network, /titles only \(not abstracts or full text\), with Porter stemming/);
     for (const [name, desc] of Object.entries(d)) {
       assert.doesNotMatch(desc, /(?<!read-)\bonly\b(?! \(not abstracts)/i, `${name}: no "only"`);
       assert.doesNotMatch(desc, /\bfirst\b(?! step)/i, `${name}: no "first" superlative`);
       assert.doesNotMatch(desc, /not (be )?logged|never logged|no logs/i, `${name}: no logging claim`);
+    }
+  });
+});
+
+test('descriptions_fit_claude_codes_cut', async () => {
+  // Claude Code cuts a tool description loaded upfront at 4,096 characters.
+  await withClient({}, async ({ client }) => {
+    for (const t of (await client.listTools()).tools) {
+      assert.ok((t.description ?? '').length <= 4_000, `${t.name}: ${t.description?.length} characters`);
     }
   });
 });
@@ -285,14 +294,12 @@ function graphDb(multiple: boolean): DatabaseSync {
 test('query_examples_run_on_the_real_schema', () => {
   const single = graphDb(false);
   const multiple = graphDb(true);
-  const [byRank, byAuthor, byYear] = QUERY_EXAMPLES;
+  const [byRank, byAuthor] = QUERY_EXAMPLES;
   // Example 1 (single seed): titles mentioning stimulation, seed excluded, since 2020.
   assert.deepEqual(single.prepare(byRank).all().map(r => r.paper_id), ['W2', 'W3']);
   // Example 2: authors ranked; runs on both graphs.
   assert.equal(single.prepare(byAuthor).all().length, 4);
   assert.equal(multiple.prepare(byAuthor).all().length, 6);
-  // Example 3 (several seeds): the seeds' neighbours by year, W0 and the seeds excluded.
-  assert.deepEqual(multiple.prepare(byYear).all().map(r => [r.published_year, r.papers]), [[2022, 1], [2021, 1]]);
   for (const sql of QUERY_EXAMPLES) {
     assert.doesNotMatch(sql, /\boffset\b/i);
     multiple.prepare(sql).all();
