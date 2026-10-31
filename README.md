@@ -119,7 +119,7 @@ Title filters match paper titles only, not abstracts or full text. Very highly c
 
 ## Privacy
 
-No account, no sign-in and no cookies. Our usage log keeps, for 90 days, one row per tool call: the tool name, your client's name and version, how long it took, the outcome and the graph size. Your IP address is stored as a hash with a salt that changes every day. The usage log holds no queries, paper IDs or raw IP addresses. Our graph service's own logs may contain the paper IDs and queries it processes; we keep them for up to 15 days, with no IP addresses. Data goes to Cloudflare (network), OpenAlex (search terms and IDs), NCBI (full text), Sentry (our graph service's error and performance monitoring) and your assistant's vendor, under its own policy. Don't put personal or health details in your prompts.
+No account, no sign-in and no cookies. Our usage log keeps, for 90 days, one row per tool call: the tool name, your client's name and version, how long it took, the outcome and the graph size. Your IP address is stored as a hash with a salt that changes every day. The usage log holds no queries, paper IDs or raw IP addresses. Our graph service's own logs may contain the paper IDs and queries it processes. We keep them for up to 15 days, with no IP addresses. Data goes to Cloudflare (network), OpenAlex (search terms and IDs), NCBI (full text), Sentry (our graph service's error and performance monitoring: request addresses that may include paper IDs, no IP addresses, kept up to 90 days) and your assistant's vendor, under its own policy. Our servers run at Hetzner and Google Cloud. Don't put personal or health details in your prompts.
 
 Full policy: https://incitefulmed.com/academic/mcp/privacy · Terms: https://incitefulmed.com/academic/mcp/terms
 
