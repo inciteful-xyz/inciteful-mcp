@@ -236,7 +236,7 @@ const CONSOLE_ALLOWLIST = new Set([
   "console.error(err instanceof Error ? err.message : 'invalid configuration');",
   'console.log(`inciteful-mcp ${VERSION} listening on ${HOST}:${PORT}`);',
   'console.log(`${signal}: draining`);',
-  "console.error('usage log: cannot open USAGE_DB_PATH; exiting');",
+  'console.error(`usage log: cannot open USAGE_DB_PATH (${errorKind(err)}); exiting`);',
   "console.warn('drain timed out; closing open connections');",
 ]);
 

@@ -13,7 +13,7 @@ import { BUILD_CAP, BuildCap, RATE_LIMIT_PER_MINUTE, RateLimiter, VENDOR_RANGES,
 import { OpenAlexClient } from './openalex.js';
 import { pages } from './pages/index.js';
 import { createServerFactory } from './tools.js';
-import { UsageLog } from './usage.js';
+import { errorKind, UsageLog } from './usage.js';
 
 const HOST = '0.0.0.0';
 const PORT = 8080;
@@ -34,11 +34,13 @@ try {
 const graph = new GraphClient(config);
 const openalex = new OpenAlexClient(config.openalexKey);
 const content = new ContentClient();
-const usage = new UsageLog(config.usageDbPath, { now: () => new Date() });
-// A path that can't be opened is a deploy error: fail now, not run for weeks without a usage log.
-// UsageLog has already warned with the error kind; this line names the variable, never its value.
-if (!usage.isOpen) {
-  console.error('usage log: cannot open USAGE_DB_PATH; exiting');
+let usage: UsageLog;
+try {
+  usage = new UsageLog(config.usageDbPath, { now: () => new Date() });
+} catch (err) {
+  // A path that can't be opened is a deploy error: fail now, not run for weeks without a usage log.
+  // The error kind only: the message may hold the path.
+  console.error(`usage log: cannot open USAGE_DB_PATH (${errorKind(err)}); exiting`);
   process.exit(1);
 }
 const buildCap = new BuildCap(BUILD_CAP);

@@ -48,7 +48,7 @@ test('startup_exits_when_the_usage_db_cannot_open', async () => {
   assert.equal(code, 1);
   // node:sqlite's ExperimentalWarning may or may not print before the exit; it isn't ours.
   const ours = stderr.split('\n').filter(l => !/ExperimentalWarning|--trace-warnings/.test(l)).join('\n');
-  assert.match(ours.trim(), /^usage log: open failed \([A-Z_]+\)\nusage log: cannot open USAGE_DB_PATH; exiting$/);
+  assert.equal(ours.trim(), 'usage log: cannot open USAGE_DB_PATH (ERR_SQLITE_ERROR); exiting');
   assert.equal(stdout, '');
   assert.doesNotMatch(stderr + stdout, /SENTINEL/);
 });

@@ -1,7 +1,8 @@
 // Usage log: one SQLite row per tool call, plus one row per (minute, caller) for rate-limit
 // rejections. It never stores queries, SQL, seeds, paper ids or raw IPs: the caller key is kept only
 // as sha256(salt + key), with a random salt that lives in memory and is replaced each UTC day.
-// Failures never reach the caller; they log one warning that names the error kind only.
+// The constructor throws when the DB can't be opened (startup exits on it). After that, failures
+// never reach the caller; they log one warning that names the error kind only.
 
 import { createHash, randomBytes as cryptoRandomBytes } from 'node:crypto';
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
@@ -23,10 +24,10 @@ const SCHEMA = `
   CREATE INDEX IF NOT EXISTS usage_ts ON usage (ts);
 `;
 
-type Op = 'open' | 'write' | 'flush' | 'purge' | 'close';
+type Op = 'write' | 'flush' | 'purge' | 'close';
 
 /** `err.code` or `err.name` when it is a plain identifier; never the message, which may hold a path. */
-function errorKind(err: unknown): string {
+export function errorKind(err: unknown): string {
   const e = err as { code?: unknown; name?: unknown } | null;
   for (const v of [e?.code, e?.name]) {
     if (typeof v === 'string' && /^[A-Za-z0-9_]{1,64}$/.test(v)) return v;
@@ -56,30 +57,26 @@ export class UsageLog implements UsageSink {
   private readonly timers: NodeJS.Timeout[] = [];
   private readonly warned = new Set<string>();
 
+  /** Throws when the DB can't be opened or set up; the error's message may hold the path. */
   constructor(path: string, opts: { now: () => Date; randomBytes?: (n: number) => Buffer }) {
     this.now = opts.now;
     this.randomBytes = opts.randomBytes ?? cryptoRandomBytes;
+    const db = new DatabaseSync(path);
     try {
-      const db = new DatabaseSync(path);
-      try {
-        db.exec('PRAGMA journal_mode = WAL');
-        db.exec('PRAGMA synchronous = NORMAL');
-        db.exec(SCHEMA);
-        this.insert = db.prepare(
-          `INSERT INTO usage (ts, tool, client_name, client_version, ip_hash, duration_ms, outcome, graph_papers, graph_depth, openalex_calls, count)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        );
-        this.insertRejection = db.prepare(`INSERT INTO usage (ts, ip_hash, outcome, count) VALUES (?, ?, 'rate_limited', ?)`);
-        this.deleteOld = db.prepare('DELETE FROM usage WHERE ts < ?');
-      } catch (err) {
-        db.close();
-        throw err;
-      }
-      this.db = db;
+      db.exec('PRAGMA journal_mode = WAL');
+      db.exec('PRAGMA synchronous = NORMAL');
+      db.exec(SCHEMA);
+      this.insert = db.prepare(
+        `INSERT INTO usage (ts, tool, client_name, client_version, ip_hash, duration_ms, outcome, graph_papers, graph_depth, openalex_calls, count)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      this.insertRejection = db.prepare(`INSERT INTO usage (ts, ip_hash, outcome, count) VALUES (?, ?, 'rate_limited', ?)`);
+      this.deleteOld = db.prepare('DELETE FROM usage WHERE ts < ?');
     } catch (err) {
-      this.warn('open', err);
-      return;
+      db.close();
+      throw err;
     }
+    this.db = db;
     this.purge();
     this.timers.push(
       setInterval(() => this.flush(), FLUSH_INTERVAL_MS).unref(),
@@ -139,11 +136,6 @@ export class UsageLog implements UsageSink {
       this.warn('purge', err);
       return 0;
     }
-  }
-
-  /** Whether the DB opened. Startup exits when it didn't; later failures never throw. */
-  get isOpen(): boolean {
-    return this.db !== null;
   }
 
   /** Stops the timers, writes every pending minute (the current one too) and closes the DB. */
