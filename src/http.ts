@@ -35,6 +35,14 @@ export const ASSETS: Readonly<Record<string, { file: string; type: string }>> = 
 };
 const ASSET_CACHE = 'public, max-age=31536000, immutable';
 
+/** On every MCP response, including the 413 and 500 that toNodeHandler builds itself. */
+const MCP_HEADERS = {
+  'Cache-Control': 'no-store, no-transform',
+  'X-Robots-Tag': 'noindex',
+  'Access-Control-Allow-Origin': '*',
+} as const;
+const MCP_HEADER_NAMES = new Set(Object.keys(MCP_HEADERS).map(k => k.toLowerCase()));
+
 // ---------------------------------------------------------------------------------------------
 // Request context and usage rows
 
@@ -92,15 +100,14 @@ export function createApp(deps: AppDeps): (req: IncomingMessage, res: ServerResp
     fetch: async (request: Request, options?: Parameters<McpHttpHandler['fetch']>[1]) => {
       const response = await deps.mcp.fetch(request, options);
       const headers = new Headers(response.headers);
-      headers.set('Cache-Control', 'no-store, no-transform');
-      headers.set('X-Robots-Tag', 'noindex');
-      headers.set('Access-Control-Allow-Origin', '*');
+      for (const [name, value] of Object.entries(MCP_HEADERS)) headers.set(name, value);
       return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
     },
   });
 
   const send = (req: IncomingMessage, res: ServerResponse, status: number, headers: OutgoingHttpHeaders, body: string | Buffer = '') => {
-    res.writeHead(status, { 'Content-Length': Buffer.byteLength(body), ...headers });
+    // A 204 has no body and must not carry Content-Length.
+    res.writeHead(status, status === 204 ? headers : { 'Content-Length': Buffer.byteLength(body), ...headers });
     res.end(req.method === 'HEAD' ? undefined : body);
   };
 
@@ -119,7 +126,7 @@ export function createApp(deps: AppDeps): (req: IncomingMessage, res: ServerResp
   const methodNotAllowed = (req: IncomingMessage, res: ServerResponse, allow: string, mcp: boolean) => {
     if (mcp) {
       const body = JSON.stringify({ jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed.' }, id: null });
-      sendOther(req, res, 405, { Allow: allow, 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }, body);
+      sendOther(req, res, 405, { Allow: allow, 'Content-Type': 'application/json', ...MCP_HEADERS }, body);
     } else {
       sendOther(req, res, 405, { Allow: allow, 'Content-Type': 'text/plain; charset=utf-8' }, 'Method Not Allowed');
     }
@@ -131,17 +138,24 @@ export function createApp(deps: AppDeps): (req: IncomingMessage, res: ServerResp
     if (!verdict.ok) {
       deps.usage.recordRejection(key);
       const body = JSON.stringify({ jsonrpc: '2.0', error: { code: -32000, message: `Rate limit exceeded; retry in ${verdict.retryAfterSecs} seconds.` }, id: null });
-      sendOther(req, res, 429, { 'Retry-After': String(verdict.retryAfterSecs), 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }, body);
+      sendOther(req, res, 429, { 'Retry-After': String(verdict.retryAfterSecs), 'Content-Type': 'application/json', ...MCP_HEADERS }, body);
       return;
     }
     const ua = req.headers['user-agent'];
     const ctx: RequestContext = { callerKey: key, userAgent: typeof ua === 'string' && ua ? ua : null, startedAt: Date.now() };
-    // Node holds written headers until the first body chunk, and an SSE stream's first chunk is the
-    // tool result. Flush them as soon as toNodeHandler writes them, so proxies and the client see
-    // the response start before any read timeout.
+    // Every response toNodeHandler writes, including the 413 and 500 it builds without calling our
+    // fetch, gets MCP_HEADERS: values in writeHead's headers object would win over setHeader, so
+    // same-named entries there are dropped first.
+    // Node also holds written headers until the first body chunk, and an SSE stream's first chunk is
+    // the tool result. Flush them at once, so proxies and the client see the response start before
+    // any read timeout.
     const writeHead = res.writeHead.bind(res) as (...args: unknown[]) => ServerResponse;
     res.writeHead = ((...args: unknown[]) => {
-      const out = writeHead(...args);
+      for (const [name, value] of Object.entries(MCP_HEADERS)) res.setHeader(name, value);
+      const fixed = args.map(arg => (arg && typeof arg === 'object' && !Array.isArray(arg)
+        ? Object.fromEntries(Object.entries(arg).filter(([name]) => !MCP_HEADER_NAMES.has(name.toLowerCase())))
+        : arg));
+      const out = writeHead(...fixed);
       res.flushHeaders();
       return out;
     }) as ServerResponse['writeHead'];
@@ -247,14 +261,21 @@ export async function drain(server: Server, tracked: Tracked, timeoutMs: number)
   server.closeIdleConnections();
   // A keep-alive connection becomes idle when its response ends; close those as they appear.
   const sweeper = setInterval(() => server.closeIdleConnections(), DRAIN_SWEEP_MS);
+  // One deadline for the whole drain: waiting for requests, then for connections to close.
   let timer: NodeJS.Timeout | undefined;
-  const timedOut = new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), timeoutMs); });
+  const timedOut = new Promise<'timeout'>(resolve => { timer = setTimeout(() => resolve('timeout'), timeoutMs); });
   try {
-    const done = await Promise.race([tracked.idle().then(() => true as const), timedOut]);
-    if (!done) server.closeAllConnections();
-    else server.closeIdleConnections();
-    await closed;
-    return done;
+    let outcome = await Promise.race([tracked.idle().then(() => 'idle' as const), timedOut]);
+    if (outcome === 'idle') {
+      server.closeIdleConnections();
+      outcome = await Promise.race([closed.then(() => 'idle' as const), timedOut]);
+    }
+    if (outcome === 'timeout') {
+      server.closeAllConnections();
+      await closed;
+      return false;
+    }
+    return true;
   } finally {
     clearInterval(sweeper);
     clearTimeout(timer);

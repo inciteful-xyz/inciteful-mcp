@@ -137,6 +137,12 @@ function normalizeIp(raw: string): string | null {
 /**
  * The rate-limit and usage key: `CF-Connecting-IP` when it holds an IP, else the TCP peer.
  * `X-Forwarded-For` is never read: any client can set it.
+ *
+ * Trusting `CF-Connecting-IP` depends on the IngressRoute's Cloudflare-only `ipAllowList`: only
+ * Cloudflare can reach Traefik for this route, and Cloudflare overwrites the header. The app can't
+ * check the source range itself, because its TCP peer is always Traefik. Only in-cluster pods can
+ * bypass Traefik and set the header. See `infrastructure/k3s/production/CLAUDE.md`, section
+ * "Academic MCP", in the inciteful-med repo.
  */
 export function callerKey(req: IncomingMessage): string {
   const header = req.headers['cf-connecting-ip'];
@@ -163,8 +169,9 @@ function parseRange(cidr: string): Range {
 
 type Bucket = { tokens: number; at: number; capacity: number };
 
-/** Buckets kept before full (idle) ones are swept. */
+/** Buckets kept before full (idle) ones are swept, and the least time between sweeps. */
 const BUCKET_SWEEP_AT = 10_000;
+const BUCKET_SWEEP_EVERY_MS = 1_000;
 
 /**
  * A token bucket per caller key, refilling continuously at `perMinute` per minute up to `perMinute`.
@@ -176,6 +183,7 @@ export class RateLimiter {
   readonly #ranges: Range[];
   readonly #now: () => number;
   readonly #buckets = new Map<string, Bucket>();
+  #lastSweep = -Infinity;
 
   constructor(opts: { perMinute: number; vendorPerMinute: number; vendorRanges: readonly string[]; now: () => number }) {
     this.#perMinute = opts.perMinute;
@@ -191,7 +199,7 @@ export class RateLimiter {
     const capacity = range ? this.#vendorPerMinute : this.#perMinute;
     let bucket = this.#buckets.get(id);
     if (!bucket) {
-      if (this.#buckets.size >= BUCKET_SWEEP_AT) this.#sweep(now);
+      if (this.#buckets.size >= BUCKET_SWEEP_AT && now - this.#lastSweep >= BUCKET_SWEEP_EVERY_MS) this.#sweep(now);
       bucket = { tokens: capacity, at: now, capacity };
       this.#buckets.set(id, bucket);
     }
@@ -218,6 +226,7 @@ export class RateLimiter {
 
   /** Drops buckets that have refilled to capacity: forgetting them changes nothing. */
   #sweep(now: number): void {
+    this.#lastSweep = now;
     for (const [id, bucket] of this.#buckets) {
       this.#refill(bucket, now);
       if (bucket.tokens >= bucket.capacity) this.#buckets.delete(id);
@@ -233,6 +242,8 @@ type Build = {
   fn: () => Promise<unknown>;
   /** While waiting: the latest deadline of the calls attached to it. */
   deadline: number;
+  /** Calls still waiting on it (not yet settled or timed out). */
+  waiters: number;
   started: boolean;
   promise: Promise<unknown>;
   resolve: (v: unknown) => void;
@@ -266,11 +277,12 @@ export class BuildCap implements BuildCapLike {
     let build = this.#builds.get(key);
     if (build) {
       if (!build.started) build.deadline = Math.max(build.deadline, deadlineAt);
+      build.waiters += 1;
     } else {
       let resolve!: (v: unknown) => void;
       let reject!: (e: unknown) => void;
       const promise = new Promise<unknown>((res, rej) => { resolve = res; reject = rej; });
-      build = { key, fn, deadline: deadlineAt, started: false, promise, resolve, reject };
+      build = { key, fn, deadline: deadlineAt, waiters: 1, started: false, promise, resolve, reject };
       this.#builds.set(key, build);
       this.#queue.push(build);
       this.#pump();
@@ -282,18 +294,22 @@ export class BuildCap implements BuildCapLike {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         reject(new BuildDeadlineError());
-        this.#expire(build);
+        build.waiters -= 1;
+        if (build.waiters === 0) this.#expire(build);
       }, Math.max(0, deadlineAt - this.#now()));
       build.promise.then(
-        (v) => { clearTimeout(timer); resolve(v); },
-        (e) => { clearTimeout(timer); reject(e); },
+        (v) => { clearTimeout(timer); build.waiters -= 1; resolve(v); },
+        (e) => { clearTimeout(timer); build.waiters -= 1; reject(e); },
       );
     });
   }
 
-  /** Forgets a build that is still waiting once every call attached to it has passed its deadline. */
+  /**
+   * Forgets a build that is still waiting once no call waits on it. Counting waiters, not comparing
+   * clocks, so a timer firing slightly before the clock reaches the deadline can't leave it queued.
+   */
   #expire(build: Build): void {
-    if (build.started || build.deadline > this.#now()) return;
+    if (build.started) return;
     const i = this.#queue.indexOf(build);
     if (i >= 0) this.#queue.splice(i, 1);
     if (this.#builds.get(build.key) === build) this.#builds.delete(build.key);

@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createServer } from 'node:http';
-import type { AddressInfo } from 'node:net';
+import { createServer, request, type IncomingHttpHeaders } from 'node:http';
+import { connect, type AddressInfo } from 'node:net';
 import { test } from 'node:test';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { createMcpHandler, McpServer, type McpHttpHandler } from '@modelcontextprotocol/server';
@@ -125,6 +125,7 @@ test('options_preflight_cors', async () => {
       assert.equal(r.headers['access-control-allow-methods'], 'POST, GET, OPTIONS');
       assert.equal(r.headers['access-control-allow-headers'], ALLOW_HEADERS);
       assert.equal(r.headers['access-control-max-age'], '86400');
+      assert.equal(r.headers['content-length'], undefined);
       assert.equal(r.body, '');
     }
     assert.deepEqual(calls.limiter, []);
@@ -143,6 +144,8 @@ test('sse_get_and_delete_405', async () => {
       const del = await raw(port, 'DELETE', path);
       assert.equal(del.status, 405);
       assert.equal(del.headers.allow, 'GET, HEAD, POST, OPTIONS');
+      assert.equal(del.headers['cache-control'], 'no-store, no-transform');
+      assert.equal(del.headers['access-control-allow-origin'], '*');
       assert.equal((await raw(port, 'PUT', path, {}, '{}')).status, 405);
     }
     assert.equal(calls.mcp.length, 0);
@@ -189,6 +192,9 @@ test('asset_allowlist_and_traversal_404', async () => {
     const head = await raw(port, 'HEAD', '/academic/mcp/assets/favicon.svg');
     assert.equal(head.status, 200);
     assert.equal(head.body, '');
+    const post = await raw(port, 'POST', '/academic/mcp/assets/favicon.svg', {}, '{}');
+    assert.equal(post.status, 405);
+    assert.equal(post.headers.allow, 'GET, HEAD');
     for (const path of [
       '/academic/mcp/assets/../../etc/passwd', '/academic/mcp/assets/%2e%2e/%2e%2e/etc/passwd', '/academic/mcp/assets/%2E%2E%2F%2E%2E%2Fetc%2Fpasswd',
       '/academic/mcp/assets/..%2fsecret.txt', '/academic/mcp/assets/../secret.txt', '/academic/mcp/assets/', '/academic/mcp/assets/other.svg',
@@ -241,11 +247,33 @@ test('rate_limit_through_app', async () => {
     const r = await raw(port, 'POST', '/academic/mcp', { ...POST_HEADERS, 'cf-connecting-ip': '203.0.113.7' }, POST_BODY);
     assert.equal(r.status, 429);
     assert.equal(r.headers['retry-after'], '17');
+    assert.equal(r.headers['cache-control'], 'no-store, no-transform');
     assert.equal(r.headers['access-control-allow-origin'], '*');
     assert.equal(r.headers['x-robots-tag'], 'noindex');
     assert.equal(r.headers['content-type'], 'application/json');
     assert.deepEqual(JSON.parse(r.body), { jsonrpc: '2.0', error: { code: -32000, message: 'Rate limit exceeded; retry in 17 seconds.' }, id: null });
     assert.deepEqual(calls.rejections, ['203.0.113.7']);
+    assert.equal(calls.mcp.length, 0);
+  });
+});
+
+test('oversized_body_413_has_mcp_headers', async () => {
+  // toNodeHandler answers this itself (4 MiB limit), without calling the handler's fetch.
+  await withApp({}, async ({ port, calls }) => {
+    // Declares a body over 4 MiB and sends only its start: the adapter rejects on Content-Length, and
+    // the test reads the answer without racing a large upload against the server closing the socket.
+    const r = await new Promise<{ status: number; headers: IncomingHttpHeaders }>((resolve, reject) => {
+      const req = request({
+        host: '127.0.0.1', port, method: 'POST', path: '/academic/mcp', agent: false,
+        headers: { ...POST_HEADERS, 'content-length': String(4 * 1024 * 1024 + 1) },
+      }, res => { res.resume(); resolve({ status: res.statusCode ?? 0, headers: res.headers }); req.destroy(); });
+      req.on('error', reject);
+      req.write('{"jsonrpc":"2.0","id":1,"method":"ping","params":{"pad":"');
+    });
+    assert.equal(r.status, 413);
+    assert.equal(r.headers['cache-control'], 'no-store, no-transform');
+    assert.equal(r.headers['x-robots-tag'], 'noindex');
+    assert.equal(r.headers['access-control-allow-origin'], '*');
     assert.equal(calls.mcp.length, 0);
   });
 });
@@ -268,7 +296,8 @@ test('healthz_makes_no_upstream_calls', async () => {
 // ---------------------------------------------------------------------------------------------
 // The real SDK handler behind the app: headers must reach the client before a slow tool's result.
 
-const TOOL_DELAY_MS = 200;
+const TOOL_DELAY_MS = 400;
+const HEADERS_MARGIN_MS = 100;
 
 function slowToolHandler() {
   return createMcpHandler(() => {
@@ -307,7 +336,7 @@ test('mcp_response_headers', async () => {
         assert.equal(call.headers.get('x-robots-tag'), 'noindex');
         assert.equal(call.headers.get('access-control-allow-origin'), '*');
         // The headers arrived well before the tool finished.
-        assert.ok(call.at - callStarted < TOOL_DELAY_MS / 2, `headers after ${call.at - callStarted} ms (modern=${modern})`);
+        assert.ok(call.at - callStarted < HEADERS_MARGIN_MS, `headers after ${call.at - callStarted} ms (modern=${modern})`);
         assert.ok(resultAt - call.at >= TOOL_DELAY_MS / 2, `result ${resultAt - call.at} ms after headers (modern=${modern})`);
         if (!modern) {
           const init = seen.find(s => s.body.includes('"initialize"'));
@@ -379,4 +408,21 @@ test('drain_gives_up_at_the_timeout', async () => {
   // The stuck request's connection was closed.
   await assert.rejects(inFlight);
   assert.equal(server.listening, false);
+});
+
+test('drain_deadline_covers_connections_that_never_close', async () => {
+  const { mcp } = gatedMcp();
+  const { server, tracked, port } = await drainServer(mcp);
+  // A request whose headers never finish: no request is in flight, but the connection isn't idle.
+  const socket = connect(port, '127.0.0.1');
+  await new Promise<void>(resolve => socket.once('connect', () => resolve()));
+  socket.on('error', () => {});
+  socket.write('POST /academic/mcp HTTP/1.1\r\nHost: x\r\n');
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(tracked.inFlight(), 0);
+  const started = performance.now();
+  assert.equal(await drain(server, tracked, 100), false);
+  assert.ok(performance.now() - started < 1_000);
+  assert.equal(server.listening, false);
+  socket.destroy();
 });

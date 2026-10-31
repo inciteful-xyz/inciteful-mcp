@@ -211,3 +211,46 @@ test('sync_throw_releases_slot', async (t) => {
   await flush();
   assert.equal(next.value, 'ok:n');
 });
+
+test('timer_firing_before_the_clock_never_starts_fn', async (t) => {
+  t.after(() => mock.timers.reset());
+  mock.timers.enable({ apis: ['setTimeout'] });
+  // The clock and the timers drift: the deadline timer fires while now() is still 1 ms short.
+  const clock = { t: 5_000 };
+  const cap = new BuildCap(1, () => clock.t);
+  const busy = deferred();
+  track(cap.run('busy', () => busy.promise, clock.t + 10_000));
+  let started = false;
+  const waiting = track(cap.run('waiting', async () => { started = true; return 'w'; }, clock.t + 50));
+  await flush();
+  clock.t += 49;
+  mock.timers.tick(50);
+  await flush();
+  assert.equal(waiting.value, 'err:BuildDeadlineError');
+  // A slot frees inside that 1 ms window.
+  busy.resolve('done');
+  await flush();
+  assert.equal(started, false);
+  assert.equal(cap.inFlight(), 0);
+});
+
+test('waiting_build_survives_while_any_caller_waits', async (t) => {
+  t.after(() => mock.timers.reset());
+  const clock = capClock();
+  const cap = new BuildCap(1, clock.now);
+  const busy = deferred();
+  track(cap.run('busy', () => busy.promise, clock.now() + 10_000));
+  let starts = 0;
+  const fn = async () => { starts += 1; return 'built'; };
+  const early = track(cap.run('shared', fn, clock.now() + 50));
+  const late = track(cap.run('shared', fn, clock.now() + 500));
+  await flush();
+  clock.tick(50);
+  await flush();
+  assert.equal(early.value, 'err:BuildDeadlineError');
+  assert.equal(late.value, 'pending');
+  busy.resolve('done');
+  await flush();
+  assert.equal(starts, 1);
+  assert.equal(late.value, 'ok:built');
+});
