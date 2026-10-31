@@ -8,7 +8,7 @@ import { createMcpHandler } from '@modelcontextprotocol/server';
 import { loadConfig, type Config } from './config.js';
 import { ContentClient } from './content.js';
 import { GraphClient } from './graph.js';
-import { createApp, drain, recordToolCalls, trackInFlight } from './http.js';
+import { createApp, recordToolCalls, shutdown, trackInFlight } from './http.js';
 import { BUILD_CAP, BuildCap, RATE_LIMIT_PER_MINUTE, RateLimiter, VENDOR_RANGES, VENDOR_RATE_LIMIT_PER_MINUTE } from './limits.js';
 import { OpenAlexClient } from './openalex.js';
 import { pages } from './pages/index.js';
@@ -71,13 +71,9 @@ const onStop = (signal: NodeJS.Signals) => {
   if (stopping) return;
   stopping = true;
   console.log(`${signal}: draining`);
-  void (async () => {
-    const finished = await drain(server, tracked, DRAIN_TIMEOUT_MS).catch(() => false);
-    if (!finished) console.warn('drain timed out; closing open connections');
-    await handler.close().catch(() => {});
-    usage.close();
-    process.exit(0);
-  })();
+  void shutdown({
+    server, tracked, close: async () => { await handler.close().catch(() => {}); usage.close(); },
+  }, DRAIN_TIMEOUT_MS, code => process.exit(code));
 };
 process.on('SIGTERM', onStop);
 process.on('SIGINT', onStop);

@@ -4,13 +4,13 @@ import { existsSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Agent, createServer, request, type IncomingHttpHeaders } from 'node:http';
-import { connect, type AddressInfo } from 'node:net';
+import type { AddressInfo } from 'node:net';
 import { test } from 'node:test';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { createMcpHandler, McpServer, type McpHttpHandler } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { loadConfig } from '../src/config.js';
-import { ASSETS, createApp, drain, trackInFlight } from '../src/http.js';
+import { ASSETS, createApp, shutdown, trackInFlight } from '../src/http.js';
 import { pages as realPages } from '../src/pages/index.js';
 import type { RateLimiter } from '../src/limits.js';
 import type { GraphMeta, PageCtx, Pages, UsageRow } from '../src/types.js';
@@ -381,53 +381,74 @@ async function drainServer(mcp: McpHttpHandler) {
   return { server, tracked, port: (server.address() as AddressInfo).port };
 }
 
-test('drain_waits_for_in_flight_then_closes', async () => {
+/** What index.ts passes `shutdown`, with `close` and `exit` recorded instead of run. */
+function stopSpy() {
+  const events: string[] = [];
+  let exited!: () => void;
+  const exit = new Promise<void>(resolve => { exited = resolve; });
+  return {
+    events, exit,
+    close: async () => { events.push('close'); },
+    onExit: (code: number) => { events.push(`exit ${code}`); exited(); },
+  };
+}
+
+test('shutdown_waits_for_in_flight_then_exits', async () => {
   const { mcp, release, reached } = gatedMcp();
   const { server, tracked, port } = await drainServer(mcp);
-  const inFlight = raw(port, 'POST', '/academic/mcp', POST_HEADERS, POST_BODY);
-  await reached;
-  assert.equal(tracked.inFlight(), 1);
-  let drained: boolean | 'pending' = 'pending';
-  const draining = drain(server, tracked, 5_000).then(v => { drained = v; });
-  // No new connections once draining.
-  await assert.rejects(raw(port, 'GET', '/healthz'), { code: 'ECONNREFUSED' });
-  await new Promise(resolve => setTimeout(resolve, 20));
-  assert.equal(drained, 'pending');
-  release();
-  const r = await inFlight;
-  assert.equal(r.status, 200);
-  await draining;
-  assert.equal(drained, true);
-  assert.equal(tracked.inFlight(), 0);
-  assert.equal(server.listening, false);
+  const spy = stopSpy();
+  try {
+    const inFlight = raw(port, 'POST', '/academic/mcp', POST_HEADERS, POST_BODY);
+    await reached;
+    assert.equal(tracked.inFlight(), 1);
+    const stopping = shutdown({ server, tracked, close: spy.close }, 5_000, spy.onExit);
+    // No new connections once draining.
+    await assert.rejects(raw(port, 'GET', '/healthz'), { code: 'ECONNREFUSED' });
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.deepEqual(spy.events, []);
+    release();
+    const r = await inFlight;
+    assert.equal(r.status, 200);
+    await stopping;
+    assert.deepEqual(spy.events, ['close', 'exit 0']);
+    assert.equal(tracked.inFlight(), 0);
+    assert.equal(server.listening, false);
+  } finally {
+    server.closeAllConnections();
+  }
 });
 
-test('drain_gives_up_at_the_timeout', async () => {
+test('shutdown_exits_at_the_timeout_with_a_request_stuck', async (t) => {
+  const warn = t.mock.method(console, 'warn', () => {});
   const { mcp, reached } = gatedMcp();
   const { server, tracked, port } = await drainServer(mcp);
-  const inFlight = raw(port, 'POST', '/academic/mcp', POST_HEADERS, POST_BODY);
-  await reached;
-  assert.equal(await drain(server, tracked, 50), false);
-  // The stuck request's connection was closed.
-  await assert.rejects(inFlight);
-  assert.equal(server.listening, false);
+  const spy = stopSpy();
+  const inFlight = raw(port, 'POST', '/academic/mcp', POST_HEADERS, POST_BODY).catch(() => 'closed');
+  try {
+    await reached;
+    const started = performance.now();
+    await shutdown({ server, tracked, close: spy.close }, 50, spy.onExit);
+    assert.ok(performance.now() - started < 1_000);
+    assert.deepEqual(spy.events, ['close', 'exit 0']);
+    assert.equal(tracked.inFlight(), 1, 'exits with the request still in flight');
+    assert.deepEqual(warn.mock.calls.map(c => c.arguments), [['drain timed out; exiting with requests in flight']]);
+  } finally {
+    server.closeAllConnections();
+    await inFlight;
+  }
 });
 
-test('drain_deadline_covers_connections_that_never_close', async () => {
-  const { mcp } = gatedMcp();
-  const { server, tracked, port } = await drainServer(mcp);
-  // A request whose headers never finish: no request is in flight, but the connection isn't idle.
-  const socket = connect(port, '127.0.0.1');
-  await new Promise<void>(resolve => socket.once('connect', () => resolve()));
-  socket.on('error', () => {});
-  socket.write('POST /academic/mcp HTTP/1.1\r\nHost: x\r\n');
-  await new Promise(resolve => setTimeout(resolve, 20));
-  assert.equal(tracked.inFlight(), 0);
-  const started = performance.now();
-  assert.equal(await drain(server, tracked, 100), false);
-  assert.ok(performance.now() - started < 1_000);
-  assert.equal(server.listening, false);
-  socket.destroy();
+test('shutdown_before_the_server_is_listening', async () => {
+  // A signal during startup: the server exists but has not bound yet (or startup hasn't built it).
+  const { app } = fakes();
+  const tracked = trackInFlight(app);
+  const server = createServer(tracked.listener);
+  const spy = stopSpy();
+  await shutdown({ server, tracked, close: spy.close }, 5_000, spy.onExit);
+  assert.deepEqual(spy.events, ['close', 'exit 0']);
+  const early = stopSpy();
+  await shutdown(null, 5_000, early.onExit);
+  assert.deepEqual(early.events, ['exit 0']);
 });
 
 // A response can end while its bytes still sit in Node's write buffer: toNodeHandler calls
@@ -481,42 +502,52 @@ async function flushingResponse() {
   return { server, tracked, release, endedWith, received, resume: () => resume(), close: () => agent.destroy() };
 }
 
-/** Longer than two drain sweeps (250 ms apart). */
-const PAST_TWO_SWEEPS_MS = 600;
+/** How long the client reads nothing: the response must wait for it, not be cut short. */
+const CLIENT_PAUSE_MS = 600;
 
-test('drain_keeps_a_connection_open_until_its_ended_response_has_flushed', async () => {
+test('shutdown_lets_an_ended_response_flush_before_exit', async () => {
   const r = await flushingResponse();
   try {
-    const draining = drain(r.server, r.tracked, 10_000);
+    const exited = stopSpy();
+    const stopping = shutdown({ server: r.server, tracked: r.tracked, close: exited.close }, 10_000, code => {
+      exited.onExit(code);
+      // The process ends here and the OS closes every socket: destroy them all, as exit would.
+      // The kernel still delivers what it has queued.
+      r.server.closeAllConnections();
+    });
     r.release();
     // Precondition: the response has ended with bytes still buffered in Node.
     assert.ok(await r.endedWith > 0);
-    await new Promise(resolve => setTimeout(resolve, PAST_TWO_SWEEPS_MS));
+    await new Promise(resolve => setTimeout(resolve, CLIENT_PAUSE_MS));
+    assert.deepEqual(exited.events, [], 'still waiting while the client reads nothing');
     r.resume();
+    await stopping;
+    assert.deepEqual(exited.events, ['close', 'exit 0']);
     assert.deepEqual(await r.received, { bytes: FLUSHING_BODY_BYTES, complete: true });
-    // Then the idle keep-alive connection is closed by a sweep, not left to Node's 5 s keep-alive timeout.
-    const flushedAt = performance.now();
-    assert.equal(await draining, true);
-    assert.ok(performance.now() - flushedAt < 1_000);
   } finally {
     r.close();
   }
 });
 
-test('drain_started_while_a_response_is_flushing_lets_it_finish', async () => {
+test('shutdown_started_while_a_response_is_flushing_lets_it_finish', async () => {
   const r = await flushingResponse();
   try {
     r.release();
     assert.ok(await r.endedWith > 0);
     // SIGTERM lands now: the response has ended but most of it is still in Node's buffer.
-    const draining = drain(r.server, r.tracked, 10_000);
-    await new Promise(resolve => setTimeout(resolve, PAST_TWO_SWEEPS_MS));
+    const exited = stopSpy();
+    const stopping = shutdown({ server: r.server, tracked: r.tracked, close: exited.close }, 10_000, code => {
+      exited.onExit(code);
+      // The process ends here and the OS closes every socket: destroy them all, as exit would.
+      // The kernel still delivers what it has queued.
+      r.server.closeAllConnections();
+    });
+    await new Promise(resolve => setTimeout(resolve, CLIENT_PAUSE_MS));
+    assert.deepEqual(exited.events, [], 'still waiting while the client reads nothing');
     r.resume();
+    await stopping;
+    assert.deepEqual(exited.events, ['close', 'exit 0']);
     assert.deepEqual(await r.received, { bytes: FLUSHING_BODY_BYTES, complete: true });
-    // Then the idle keep-alive connection is closed by a sweep, not left to Node's 5 s keep-alive timeout.
-    const flushedAt = performance.now();
-    assert.equal(await draining, true);
-    assert.ok(performance.now() - flushedAt < 1_000);
   } finally {
     r.close();
   }

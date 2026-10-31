@@ -1,5 +1,5 @@
 // The HTTP front: routing at /academic/mcp (spec §4.2), CORS, the rate limit, the request context
-// for usage rows, and the SIGTERM drain. Nothing here logs: stdout and stderr carry no request data.
+// for usage rows, and the SIGTERM drain. Nothing here logs request data: the one warning is a fixed string.
 
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { readFile } from 'node:fs/promises';
@@ -240,18 +240,17 @@ export function createApp(deps: AppDeps): (req: IncomingMessage, res: ServerResp
 // ---------------------------------------------------------------------------------------------
 // In-flight tracking and the SIGTERM drain
 
-const DRAIN_SWEEP_MS = 250;
-
 export type Tracked = {
   listener: (req: IncomingMessage, res: ServerResponse) => void;
   inFlight: () => number;
-  /** True while a response has ended but its bytes may still sit in Node's write buffer. */
-  flushing: () => boolean;
   /** Resolves when no request is in flight. */
   idle: () => Promise<void>;
 };
 
-/** Tracks requests from arrival until their response closes (flushed or aborted). */
+/**
+ * Tracks requests from arrival until their response closes. 'close' follows 'finish', which fires
+ * once the socket has handed every byte to the kernel, or the connection was aborted.
+ */
 export function trackInFlight(listener: (req: IncomingMessage, res: ServerResponse) => void): Tracked {
   const open = new Set<ServerResponse>();
   let waiters: Array<() => void> = [];
@@ -269,45 +268,30 @@ export function trackInFlight(listener: (req: IncomingMessage, res: ServerRespon
       listener(req, res);
     },
     inFlight: () => open.size,
-    // 'close' follows 'finish', which fires once the socket has handed every byte to the kernel.
-    flushing: () => [...open].some(res => res.writableEnded),
     idle: () => (open.size === 0 ? Promise.resolve() : new Promise<void>(resolve => waiters.push(resolve))),
   };
 }
 
+export type Stoppable = { server: Server; tracked: Tracked; close: () => Promise<void> };
+
 /**
- * Stops accepting connections and waits up to `timeoutMs` for in-flight requests to finish. Idle
- * keep-alive connections are closed once their response has flushed; at the timeout every
- * connection is closed.
- * Resolves true when everything finished in time.
+ * SIGTERM/SIGINT: stop accepting connections, wait up to `timeoutMs` for in-flight requests, run
+ * `close`, then `exit(0)`, whether the requests finished or not. `null` (startup hasn't built the
+ * server yet) exits at once. Open connections are left to the exit: by then every finished response
+ * is with the kernel, which still delivers it after the process ends.
  */
-export async function drain(server: Server, tracked: Tracked, timeoutMs: number): Promise<boolean> {
-  // closeIdleConnections() destroys every connection whose response has ended, even one whose
-  // bytes are still in Node's write buffer, and destroy() drops them: the client never gets the
-  // end of its response. So skip a sweep while any response is flushing. http.Server#close() runs
-  // an unguarded sweep, so stop listening with net.Server#close() instead.
-  const closed = new Promise<void>(resolve => NetServer.prototype.close.call(server, () => resolve()));
-  const sweep = () => { if (!tracked.flushing()) server.closeIdleConnections(); };
-  sweep();
-  // A keep-alive connection becomes idle when its response ends; close those as they appear.
-  const sweeper = setInterval(sweep, DRAIN_SWEEP_MS);
-  // One deadline for the whole drain: waiting for requests, then for connections to close.
-  let timer: NodeJS.Timeout | undefined;
-  const timedOut = new Promise<'timeout'>(resolve => { timer = setTimeout(() => resolve('timeout'), timeoutMs); });
-  try {
-    let outcome = await Promise.race([tracked.idle().then(() => 'idle' as const), timedOut]);
-    if (outcome === 'idle') {
-      sweep();
-      outcome = await Promise.race([closed.then(() => 'idle' as const), timedOut]);
-    }
-    if (outcome === 'timeout') {
-      server.closeAllConnections();
-      await closed;
-      return false;
-    }
-    return true;
-  } finally {
-    clearInterval(sweeper);
+export async function shutdown(s: Stoppable | null, timeoutMs: number, exit: (code: number) => void): Promise<void> {
+  if (s) {
+    // net.Server#close, not http.Server#close: that one also destroys idle keep-alive connections,
+    // and counts as idle a connection whose response has ended with bytes still in Node's write
+    // buffer, which are then lost. Safe on a server that isn't listening yet.
+    NetServer.prototype.close.call(s.server);
+    let timer: NodeJS.Timeout | undefined;
+    const timedOut = new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), timeoutMs); });
+    const finished = await Promise.race([s.tracked.idle().then(() => true), timedOut]);
     clearTimeout(timer);
+    if (!finished) console.warn('drain timed out; exiting with requests in flight');
+    await s.close().catch(() => {});
   }
+  exit(0);
 }

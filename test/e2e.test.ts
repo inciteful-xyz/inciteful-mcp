@@ -237,7 +237,7 @@ const CONSOLE_ALLOWLIST = new Set([
   'console.log(`inciteful-mcp ${VERSION} listening on ${HOST}:${PORT}`);',
   'console.log(`${signal}: draining`);',
   'console.error(`usage log: cannot open USAGE_DB_PATH (${errorKind(err)}); exiting`);',
-  "console.warn('drain timed out; closing open connections');",
+  "console.warn('drain timed out; exiting with requests in flight');",
 ]);
 
 function sourceFiles(dir: string): string[] {
