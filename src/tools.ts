@@ -7,10 +7,12 @@ import { bibtexEntries, risEntries } from './citations.js';
 import type { ContentClient, ContentLink } from './content.js';
 import {
   BuildDeadlineError, GraphError, GraphUnavailableError, OpenAlexBudgetExhausted, OpenAlexError, QueryTimeoutError, TitleFilterError,
+  ToolDeadlineError,
 } from './errors.js';
 import type { ConnectorPaper, GraphClient, SimilarPaper } from './graph.js';
 import {
-  MAX_ANALYSIS_LIMIT, MAX_PAPER_IDS, MAX_READ_CHARS, MAX_SEARCH_LIMIT, MAX_SEEDS, MAX_SQL_LIMIT, OUTPUT_CAP_BYTES, TOOL_CEILING_MS, URL_SEED_CAP,
+  GRACE_MS, MAX_ANALYSIS_LIMIT, MAX_PAPER_IDS, MAX_QUERY_CHARS, MAX_READ_CHARS, MAX_SEARCH_LIMIT, MAX_SEEDS, MAX_SQL_CHARS, MAX_SQL_LIMIT,
+  METADATA_WAIT_MS, OUTPUT_CAP_BYTES, TOOL_CEILING_MS, URL_SEED_CAP,
 } from './limits.js';
 import { countOpenAlexRequests, type OpenAlexClient, type Work } from './openalex.js';
 import { capResult } from './output.js';
@@ -56,11 +58,11 @@ class ToolFailure extends Error {
 const retryIn = (secs: number | null) => (secs === null ? 'retry shortly' : `retry in about ${secs} seconds`);
 
 /**
- * Maps any thrown value to a message for the client and an outcome. Messages are fixed strings or
- * our own validators' text, except graph-api's SQL error for `query_citation_graph`, which echoes the
- * caller's own SQL. Nothing here carries a URL or a key, and nothing is logged.
+ * Maps any thrown value to a message for the client and an outcome. Messages are fixed strings or our
+ * own text (`ToolFailure`, which for `query_citation_graph` may carry graph-api's error about the
+ * caller's own SQL). Nothing here carries a URL or a key, and nothing is logged.
  */
-function describeError(err: unknown, tool: string): { message: string; outcome: ToolOutcome } {
+function describeError(err: unknown): { message: string; outcome: ToolOutcome } {
   if (err instanceof ToolFailure) return { message: err.message, outcome: err.outcome };
   if (err instanceof TitleFilterError) return { message: err.message, outcome: 'tool_error' };
   if (err instanceof QueryTimeoutError) {
@@ -73,12 +75,7 @@ function describeError(err: unknown, tool: string): { message: string; outcome: 
   if (err instanceof OpenAlexBudgetExhausted) {
     return { message: `The OpenAlex request budget is used up for now; ${retryIn(err.retryAfterSecs)}.`, outcome: 'upstream_unavailable' };
   }
-  if (err instanceof GraphError) {
-    if (tool === 'query_citation_graph' && err.status === 400) {
-      return { message: err.detail ? `graph-api rejected the query: ${err.detail}` : 'graph-api rejected the query.', outcome: 'tool_error' };
-    }
-    return { message: err.message, outcome: 'upstream_unavailable' };
-  }
+  if (err instanceof GraphError) return { message: err.message, outcome: 'upstream_unavailable' };
   if (err instanceof OpenAlexError) return { message: 'OpenAlex returned an error; retry shortly.', outcome: 'upstream_unavailable' };
   return { message: 'The tool failed unexpectedly.', outcome: 'tool_error' };
 }
@@ -327,7 +324,11 @@ function reviewPrompt(topic: string | undefined, seedText: string | undefined): 
 // ---------------------------------------------------------------------------------------------
 // Factory
 
-type Call = { deadlineAt: number; graphPapers: number | null; graphDepth: number | null };
+/**
+ * Per tool call. `signal` aborts at the ceiling plus `GRACE_MS`; it goes to non-build calls only
+ * (resolve, OpenAlex, PMC), never to a graph build, which must be left to finish upstream.
+ */
+type Call = { deadlineAt: number; signal: AbortSignal; graphPapers: number | null; graphDepth: number | null };
 type Resolved = { seeds: SeedResolution[]; ids: string[]; inputOrder: string[]; duplicates: string[]; meta: GraphMeta };
 
 function clientInfoOf(ctx: ServerContext, server: McpServer): ToolSettled['clientInfo'] {
@@ -362,8 +363,8 @@ export function createServerFactory(deps: ToolDeps): McpServerFactory {
   };
 
   /** Seed handling for every graph tool: resolve, deduplicate (keeping the first input per paper). */
-  async function resolveSeeds(inputs: string[]): Promise<Resolved> {
-    const { results, snapshot, recentTier } = await graph.resolve(inputs);
+  async function resolveSeeds(inputs: string[], call: Call): Promise<Resolved> {
+    const { results, snapshot, recentTier } = await graph.resolve(inputs, { signal: call.signal });
     const seen = new Set<string>();
     const seedsOut: SeedResolution[] = [];
     const duplicates: string[] = [];
@@ -393,10 +394,14 @@ export function createServerFactory(deps: ToolDeps): McpServerFactory {
 
   const capKey = (...parts: unknown[]) => JSON.stringify(parts);
 
-  /** The graph's metadata table, or nothing: a failure here costs the stats, never the rows. */
+  /**
+   * The graph's metadata table, or nothing: a failure here costs the stats, never the rows. The graph
+   * is built by then, so it waits `METADATA_WAIT_MS` at most.
+   */
   async function graphMetadata(ids: string[], call: Call): Promise<Record<string, string> | undefined> {
     try {
-      const gm = await buildCap.run(capKey('metadata', ids), () => graph.metadata(ids), call.deadlineAt);
+      const deadlineAt = Math.min(call.deadlineAt, deps.now().getTime() + METADATA_WAIT_MS);
+      const gm = await buildCap.run(capKey('metadata', ids), () => graph.metadata(ids), deadlineAt);
       call.graphPapers = num(gm.paper_count);
       call.graphDepth = num(gm.graph_depth);
       return gm;
@@ -413,18 +418,33 @@ export function createServerFactory(deps: ToolDeps): McpServerFactory {
       handler: (args: z.output<S>, call: Call) => Promise<{ rows: unknown[] } & Record<string, unknown>>,
     ) {
       const executor = async (args: z.output<S>, ctx: ServerContext): Promise<CallToolResult> => {
-        const call: Call = { deadlineAt: deps.now().getTime() + TOOL_CEILING_MS, graphPapers: null, graphDepth: null };
+        const deadlineAt = deps.now().getTime() + TOOL_CEILING_MS;
+        const ac = new AbortController();
+        const call: Call = { deadlineAt, signal: ac.signal, graphPapers: null, graphDepth: null };
         const counter = { calls: 0 };
+        // The ceiling for the whole call. A build reaching the deadline reports "still building" through
+        // the build cap first; the grace keeps this timer from racing it.
+        const timer = setTimeout(() => ac.abort(new ToolDeadlineError()), Math.max(0, deadlineAt - deps.now().getTime()) + GRACE_MS);
         let result: CallToolResult;
         let outcome: ToolOutcome;
         try {
-          const value = capResult(await countOpenAlexRequests(counter, () => handler(args, call)));
+          const work = countOpenAlexRequests(counter, () => handler(args, call));
+          // The handler may still reject after the ceiling has answered the client.
+          work.catch(() => {});
+          const aborted = new Promise<never>((_, reject) => {
+            ac.signal.addEventListener('abort', () => reject(ac.signal.reason), { once: true });
+          });
+          const value = capResult(await Promise.race([work, aborted]));
           result = { content: [{ type: 'text', text: JSON.stringify(value) }], structuredContent: value };
           outcome = 'ok';
         } catch (err) {
-          const { message, outcome: o } = describeError(err, name);
+          const { message, outcome: o } = !(err instanceof BuildDeadlineError) && ac.signal.aborted
+            ? { message: 'The request took too long upstream; retry in about a minute.', outcome: 'timeout' as const }
+            : describeError(err);
           result = { content: [{ type: 'text', text: message }], isError: true };
           outcome = o;
+        } finally {
+          clearTimeout(timer);
         }
         try {
           deps.onToolSettled?.({
@@ -446,21 +466,21 @@ export function createServerFactory(deps: ToolDeps): McpServerFactory {
     };
 
     register('search_literature', z.object({
-      query: z.string().trim().min(1).describe('Keywords, a title or a phrase.'),
+      query: z.string().trim().min(1).max(MAX_QUERY_CHARS).describe('Keywords, a title or a phrase.'),
       limit: limit(MAX_SEARCH_LIMIT, 10),
       cursor: z.string().min(1).optional().describe('next_cursor from the previous page.'),
       year_from: year.optional(), year_to: year.optional(),
       open_access: z.boolean().optional().describe('true keeps open-access papers.'),
-    }), async a => {
+    }), async (a, call) => {
       checkYears(a.year_from, a.year_to);
       const { works, nextCursor } = await openalex.search(a.query, {
-        limit: a.limit, cursor: a.cursor, yearFrom: a.year_from, yearTo: a.year_to, openAccess: a.open_access,
+        limit: a.limit, cursor: a.cursor, yearFrom: a.year_from, yearTo: a.year_to, openAccess: a.open_access, signal: call.signal,
       });
       return { rows: works.map(openalexRow), next_cursor: nextCursor };
     });
 
-    register('get_papers', z.object({ ids: idList.describe(`1–${MAX_PAPER_IDS} DOIs, OpenAlex IDs, PMIDs or PMCIDs.`) }), async a => {
-      const { works, unresolved } = await openalex.works(a.ids);
+    register('get_papers', z.object({ ids: idList.describe(`1–${MAX_PAPER_IDS} DOIs, OpenAlex IDs, PMIDs or PMCIDs.`) }), async (a, call) => {
+      const { works, unresolved } = await openalex.works(a.ids, { signal: call.signal });
       const rows = works.map(w => {
         const oa = w.best_oa_location;
         const names = w.authorships.map(x => x.author.display_name).filter((n): n is string => n !== null);
@@ -477,7 +497,7 @@ export function createServerFactory(deps: ToolDeps): McpServerFactory {
     });
 
     register('find_similar_papers', z.object({ seeds, limit: limit(MAX_ANALYSIS_LIMIT, 25) }), async (a, call) => {
-      const r = await resolveSeeds(a.seeds);
+      const r = await resolveSeeds(a.seeds, call);
       const multiple = r.ids.length > 1;
       const link = r.ids.length ? urls.seedSetUrl(r.inputOrder) : null;
       const prov = (meta: GraphMeta) => provenanceFor('find_similar_papers', r, meta, {
@@ -519,7 +539,7 @@ export function createServerFactory(deps: ToolDeps): McpServerFactory {
         year_from: a.year_from ?? null, year_to: a.year_to ?? null,
       };
 
-      const r = await resolveSeeds(a.seeds);
+      const r = await resolveSeeds(a.seeds, call);
       const multiple = r.ids.length > 1;
       const link = r.ids.length ? urls.seedSetUrl(r.inputOrder) : null;
       const method = methodFor(a.analysis, multiple);
@@ -527,7 +547,7 @@ export function createServerFactory(deps: ToolDeps): McpServerFactory {
         return { analysis: a.analysis, rows: [], ...provenanceFor('explore_citation_network', r, r.meta, { method, filters }, link) };
       }
       if (linked) {
-        const { works, total } = await openalex.linked(r.ids, a.analysis as 'references' | 'citations', a.limit);
+        const { works, total } = await openalex.linked(r.ids, a.analysis as 'references' | 'citations', a.limit, { signal: call.signal });
         return {
           analysis: a.analysis, rows: works.map(openalexRow),
           ...provenanceFor('explore_citation_network', r, r.meta, { method, filters, total }, link),
@@ -547,7 +567,7 @@ export function createServerFactory(deps: ToolDeps): McpServerFactory {
       to: idString.describe('DOI, OpenAlex ID or PMID.'),
       extended: z.boolean().default(false).describe('Also return longer paths.'),
     }), async (a, call) => {
-      const r = await resolveSeeds([a.from, a.to]);
+      const r = await resolveSeeds([a.from, a.to], call);
       const method = 'Literature Connector: shortest citation paths, citations taken in either direction';
       const empty = (meta: GraphMeta) => ({ rows: [], paths: [], edges: [], ...provenanceFor('connect_papers', r, meta, { method, filters: {}, fastPath: 'connector' }, null) });
       if (r.duplicates.length) throw new ToolFailure('from and to are the same paper.');
@@ -556,31 +576,56 @@ export function createServerFactory(deps: ToolDeps): McpServerFactory {
       const [from, to] = [fromSeed.id, toSeed.id];
       const res = await buildCap.run(capKey('connector', from, to, a.extended), () => graph.connector(from, to, a.extended), call.deadlineAt);
       call.graphPapers = res.papers_searched;
-      const hops = res.paths.map(p => p.length - 1);
-      const out = provenanceFor('connect_papers', r, { snapshot: res.snapshot, recentTier: res.recentTier }, {
-        method, filters: { extended: a.extended }, fastPath: 'connector', connector: { papersSearched: res.papers_searched, hops },
-      }, null);
-      if (!res.paths.length) {
-        out.diagnostics.advisories.unshift('No citation path was found between the two papers within the search; try extended: true.');
-      }
-      return { rows: res.papers.map(graphPaperRow), paths: res.paths, edges: res.connections, ...out, inciteful_url: urls.connectorUrl(from, to) };
+      // Shortest first (a stable sort), so trimming to fit keeps the most direct connections.
+      const paths = [...res.paths].sort((x, y) => x.length - y.length);
+      const meta = { snapshot: res.snapshot, recentTier: res.recentTier };
+      // The result from the first k paths: papers and edges on those paths only, so nothing dangles.
+      const build = (k: number) => {
+        const kept = paths.slice(0, k);
+        const onPaths = new Set(kept.flat());
+        const out = provenanceFor('connect_papers', r, meta, {
+          method, filters: { extended: a.extended }, fastPath: 'connector',
+          connector: { papersSearched: res.papers_searched, hops: kept.map(p => p.length - 1) },
+        }, null);
+        if (!paths.length) out.diagnostics.advisories.unshift('No citation path was found between the two papers within the search; try extended: true.');
+        if (k < paths.length) {
+          out.diagnostics.advisories.unshift(`Showing ${k} of ${paths.length} paths (shortest first); the longer ones were left out to fit the output size.`);
+        }
+        return {
+          rows: res.papers.filter(p => onPaths.has(p.id)).map(graphPaperRow),
+          paths: kept,
+          edges: res.connections.filter(e => onPaths.has(e.citing) && onPaths.has(e.cited)),
+          ...out, inciteful_url: urls.connectorUrl(from, to), truncated: k < paths.length,
+        };
+      };
+      return fitConnector(build, paths.length);
     });
 
     register('query_citation_graph', z.object({
       seeds,
-      sql: z.string().trim().min(1).describe('A single SQLite SELECT statement.'),
+      sql: z.string().trim().min(1).max(MAX_SQL_CHARS).describe('A single SQLite SELECT statement.'),
       limit: limit(MAX_SQL_LIMIT, 100),
     }), async (a, call) => {
       // Before any call. No quote-awareness: a false positive just asks for a rewrite.
       if (/\boffset\b/i.test(a.sql) || /\blimit\s+\d+\s*,/i.test(a.sql)) {
         throw new ToolFailure("OFFSET isn't supported; use a narrower WHERE or ORDER BY");
       }
-      const r = await resolveSeeds(a.seeds);
+      const r = await resolveSeeds(a.seeds, call);
       const multiple = r.ids.length > 1;
       const link = r.ids.length ? urls.sqlUrl(r.inputOrder, a.sql) : null;
       const method = `custom SQL (${multiple ? 'local; multi-seed graph rooted at a synthetic paper citing all seeds' : 'local; single-seed graph'})`;
       if (!r.ids.length) return { rows: [], ...provenanceFor('query_citation_graph', r, r.meta, { method, filters: {} }, link) };
-      const { rows, ...meta } = await buildCap.run(capKey('query', r.ids, a.sql, a.limit), () => graph.query(r.ids, a.sql, a.limit), call.deadlineAt);
+      let answer: Awaited<ReturnType<GraphClient['query']>>;
+      try {
+        answer = await buildCap.run(capKey('query', r.ids, a.sql, a.limit), () => graph.query(r.ids, a.sql, a.limit), call.deadlineAt);
+      } catch (err) {
+        // A 400 here is graph-api's error about the caller's own SQL, which they need to fix it.
+        if (err instanceof GraphError && err.status === 400) {
+          throw new ToolFailure(err.detail ? `graph-api rejected the query: ${err.detail}` : 'graph-api rejected the query.');
+        }
+        throw err;
+      }
+      const { rows, ...meta } = answer;
       const graphMeta = await graphMetadata(r.ids, call);
       return {
         rows,
@@ -592,8 +637,8 @@ export function createServerFactory(deps: ToolDeps): McpServerFactory {
       id: idString.describe('DOI, OpenAlex ID, PMID or PMCID.'),
       offset: z.number().int().min(0).default(0).describe('Character offset; 0 to start, then next_offset.'),
       max_chars: z.number().int().min(1).max(MAX_READ_CHARS).default(15_000),
-    }), async a => {
-      const { works, unresolved } = await openalex.works([a.id]);
+    }), async (a, call) => {
+      const { works, unresolved } = await openalex.works([a.id], { signal: call.signal });
       const w = works[0];
       if (!w) {
         const reason = unresolved[0]?.reason ?? 'not_found';
@@ -601,7 +646,7 @@ export function createServerFactory(deps: ToolDeps): McpServerFactory {
           ? new ToolFailure('OpenAlex was unavailable for that paper (unavailable); retry shortly.', 'upstream_unavailable')
           : new ToolFailure("Couldn't find that paper in OpenAlex (not_found).");
       }
-      const read = await content.readPaper(w, a.offset, a.max_chars);
+      const read = await content.readPaper(w, a.offset, a.max_chars, { signal: call.signal });
       const links = read.links.map(({ priority: _priority, ...l }: ContentLink) => l);
       const advisories: string[] = [];
       if (read.text === undefined) advisories.push('PMC has no open full text for this paper; the links in rows may have it.');
@@ -616,8 +661,8 @@ export function createServerFactory(deps: ToolDeps): McpServerFactory {
     register('export_citations', z.object({
       ids: idList.describe(`1–${MAX_PAPER_IDS} DOIs, OpenAlex IDs, PMIDs or PMCIDs.`),
       format: z.enum(['bibtex', 'ris']),
-    }), async a => {
-      const { works, unresolved } = await openalex.works(a.ids);
+    }), async (a, call) => {
+      const { works, unresolved } = await openalex.works(a.ids, { signal: call.signal });
       const entries = a.format === 'bibtex' ? bibtexEntries(works) : risEntries(works);
       return { format: a.format, rows: works.map((w, i) => ({ openalex_id: w.id, doi: bareDoi(w.doi), entry: entries[i] })), unresolved };
     });
@@ -635,6 +680,23 @@ export function createServerFactory(deps: ToolDeps): McpServerFactory {
 
     return server;
   };
+}
+
+/**
+ * The connector result from the largest number of (shortest-first) paths whose serialized result fits
+ * the output cap. `build(k)` makes the whole result from the first k paths.
+ */
+function fitConnector<T>(build: (k: number) => T, n: number): T {
+  const fits = (k: number) => Buffer.byteLength(JSON.stringify(build(k))) <= OUTPUT_CAP_BYTES;
+  if (fits(n)) return build(n);
+  let lo = 0;
+  let hi = n - 1;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (fits(mid)) lo = mid;
+    else hi = mid - 1;
+  }
+  return build(lo);
 }
 
 type ReadValue = { text: string | null; offset: number; next_offset: number | null; diagnostics: { advisories: string[] }; rows: unknown[] };

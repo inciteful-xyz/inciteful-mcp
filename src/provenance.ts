@@ -3,6 +3,8 @@ import type { GraphMeta, SeedResolution } from './types.js';
 export const DATA_SOURCE = "OpenAlex metadata (CC0) via Inciteful's citation graph";
 export const ALWAYS_ADVISORY = 'Retraction and preprint flags: use get_papers.';
 const TITLE_FILTER_KEYS = ['title_all', 'title_any', 'title_none'];
+/** Unresolved seeds listed one advisory each, up to this many. */
+const MAX_SEED_ADVISORIES = 10;
 
 export type ProvenanceInput = {
   now: Date;
@@ -64,7 +66,9 @@ export function buildProvenance(input: ProvenanceInput): { provenance: object; d
   if (input.fastPath !== 'connector' && resolved.length < 3) {
     advisories.push(`Only ${plural(resolved.length, 'seed paper', 'seed papers')} resolved; with fewer than 3 seeds the results lean heavily on those papers, so add seeds for a broader picture.`);
   }
-  for (const u of unresolved) advisories.push(`Seed "${u.input}" wasn't used: ${u.reason}.`);
+  // Past a handful, one line: unresolved_seeds still lists every one.
+  if (unresolved.length > MAX_SEED_ADVISORIES) advisories.push(`${unresolved.length} seeds unresolved; see unresolved_seeds.`);
+  else for (const u of unresolved) advisories.push(`Seed "${u.input}" wasn't used: ${u.reason}.`);
   const depth = graph.depth as number | null;
   if (depth !== null && input.requestedDepth !== undefined && depth < input.requestedDepth) {
     advisories.push(`The graph reached depth ${depth}, below the requested ${input.requestedDepth}, because the next layer was too large; results cover a smaller neighbourhood.`);
@@ -85,7 +89,7 @@ export function buildProvenance(input: ProvenanceInput): { provenance: object; d
     // Only a trailing top-level LIMIT; one inside a subquery or CTE is never read.
     const userLimit = input.sqlExecuted.trim().match(/\blimit\s+(\d+)\s*;?\s*$/i)?.[1];
     if (userLimit !== undefined && Number(userLimit) !== input.effectiveLimit) {
-      advisories.push(`graph-api applies LIMIT ${input.effectiveLimit} in place of the query's LIMIT`);
+      advisories.push(`graph-api applies LIMIT ${input.effectiveLimit} in place of the query's LIMIT.`);
     }
   }
   advisories.push(ALWAYS_ADVISORY);

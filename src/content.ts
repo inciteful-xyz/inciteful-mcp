@@ -85,8 +85,9 @@ export class ContentClient {
   constructor(fetcher: typeof fetch = fetch) { this.#fetch = fetcher; }
 
   /** The URL is built from the PMCID alone, never taken from publisher metadata. */
-  async #download(url: URL): Promise<string> {
-    const response = await this.#fetch(url, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS), redirect: 'error' });
+  async #download(url: URL, signal?: AbortSignal): Promise<string> {
+    const timeout = AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS);
+    const response = await this.#fetch(url, { signal: signal ? AbortSignal.any([signal, timeout]) : timeout, redirect: 'error' });
     if (!response.ok) throw new Error(`Content source returned HTTP ${response.status}.`);
     if (Number(response.headers.get('content-length')) > MAX_DOWNLOAD_BYTES) { await response.body?.cancel(); throw new Error('Article exceeds the 12 MiB download limit.'); }
     if (!response.body) throw new Error('Content source returned an empty response.');
@@ -105,14 +106,14 @@ export class ContentClient {
     return Buffer.concat(chunks).toString('utf8');
   }
 
-  async #article(pmcid: string): Promise<Article | null> {
+  async #article(pmcid: string, signal?: AbortSignal): Promise<Article | null> {
     const cached = this.#cache.get(pmcid);
     if (cached && cached.expires > Date.now()) return cached.article;
     this.#cache.delete(pmcid);
     let article: Article;
     try {
       const url = new URL(`https://www.ncbi.nlm.nih.gov/research/bionlp/RESTful/pmcoa.cgi/BioC_json/${encodeURIComponent(pmcid)}/unicode`);
-      const parsed = parseBioC(JSON.parse(await this.#download(url)), pmcid);
+      const parsed = parseBioC(JSON.parse(await this.#download(url, signal)), pmcid);
       article = { text: parsed.text, sha256: createHash('sha256').update(parsed.text).digest('hex'), license: parsed.license };
     } catch {
       // Not in the PMC open-access set, unreadable, or the wrong article: the caller gets links instead.
@@ -123,10 +124,10 @@ export class ContentClient {
     return article;
   }
 
-  /** `sha256` is of the whole article text, or `null` when no text was retrieved. */
-  async readPaper(work: Work, offset: number, maxChars: number): Promise<ReadResult> {
+  /** `sha256` is of the whole article text, or `null` when no text was retrieved. `signal` aborts the download. */
+  async readPaper(work: Work, offset: number, maxChars: number, opts: { signal?: AbortSignal } = {}): Promise<ReadResult> {
     const links = contentLinks(work);
-    const article = work.ids.pmcid ? await this.#article(work.ids.pmcid) : null;
+    const article = work.ids.pmcid ? await this.#article(work.ids.pmcid, opts.signal) : null;
     if (!article) return { nextOffset: null, sha256: null, license: null, links };
     const start = Math.min(offset, article.text.length);
     const end = Math.min(article.text.length, start + maxChars);

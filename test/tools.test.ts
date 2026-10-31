@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { test } from 'node:test';
+import { mock, test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { AjvJsonSchemaValidator } from '@modelcontextprotocol/client/validators/ajv';
@@ -61,10 +61,14 @@ type Calls = {
   metadata: string[][]; connector: Array<{ from: string; to: string; extended: boolean }>;
   search: Array<{ query: string; opts: unknown }>; works: string[][]; linked: Array<{ ids: string[]; direction: string; limit: number }>;
   readPaper: Array<{ id: string; offset: number; maxChars: number }>; cap: Array<{ key: string; deadlineAt: number }>;
+  /** Any argument a graph build received beyond its own; builds must never get the call's signal. */
+  buildExtra: unknown[];
+  /** The signal each non-build call received. */
+  signals: Array<AbortSignal | undefined>;
 };
 
 type Over = Partial<{
-  resolve: (inputs: string[]) => Promise<SeedResolution[]>;
+  resolve: (inputs: string[], signal?: AbortSignal) => Promise<SeedResolution[]>;
   similar: (ids: string[], n: number) => Promise<SimilarPaper[]>;
   query: (ids: string[], sql: string, limit: number) => Promise<Record<string, unknown>[]>;
   metadata: (ids: string[]) => Promise<Record<string, string>>;
@@ -75,6 +79,7 @@ type Over = Partial<{
   readPaper: (w: Work, offset: number, maxChars: number) => Promise<ReadResult>;
   cap: BuildCapLike;
   openalex: OpenAlexClient;
+  now: () => Date;
 }>;
 
 const META = { snapshot: '2026-10-15', recentTier: null };
@@ -84,29 +89,34 @@ const GRAPH_META = {
 };
 
 function fakes(over: Over = {}) {
-  const calls: Calls = { resolve: [], similar: [], query: [], metadata: [], connector: [], search: [], works: [], linked: [], readPaper: [], cap: [] };
+  const calls: Calls = { resolve: [], similar: [], query: [], metadata: [], connector: [], search: [], works: [], linked: [], readPaper: [], cap: [], buildExtra: [], signals: [] };
   const graph = {
     lastMeta: META,
-    async resolve(inputs: string[]) {
+    async resolve(inputs: string[], opts?: { signal?: AbortSignal }) {
       calls.resolve.push(inputs);
-      return { results: over.resolve ? await over.resolve(inputs) : inputs.map(resolveOne), ...META };
+      calls.signals.push(opts?.signal);
+      return { results: over.resolve ? await over.resolve(inputs, opts?.signal) : inputs.map(resolveOne), ...META };
     },
-    async similar(ids: string[], n: number) {
+    async similar(ids: string[], n: number, ...extra: unknown[]) {
       calls.similar.push({ ids, n });
+      calls.buildExtra.push(...extra);
       return { papers: over.similar ? await over.similar(ids, n) : [paper('W9', 2), paper('W8', 1)], ...META };
     },
-    async query(ids: string[], sql: string, limit: number) {
+    async query(ids: string[], sql: string, limit: number, ...extra: unknown[]) {
       calls.query.push({ ids, sql, limit });
+      calls.buildExtra.push(...extra);
       const rows = over.query ? await over.query(ids, sql, limit)
         : [{ paper_id: 'W9', doi: '10.1/w9', authors: JSON.stringify([{ name: 'Ann' }, { name: 'Bo' }, { name: 'Cy' }, { name: 'Di' }]), title: 'Nine', journal: 'J', published_year: 2022, num_cited_by: 5, distance: 1, page_rank: 0.2 }];
       return { rows, ...META };
     },
-    async metadata(ids: string[]) {
+    async metadata(ids: string[], ...extra: unknown[]) {
       calls.metadata.push(ids);
+      calls.buildExtra.push(...extra);
       return over.metadata ? over.metadata(ids) : GRAPH_META;
     },
-    async connector(from: string, to: string, extended: boolean) {
+    async connector(from: string, to: string, extended: boolean, ...extra: unknown[]) {
       calls.connector.push({ from, to, extended });
+      calls.buildExtra.push(...extra);
       const result = over.connector ? await over.connector(from, to) : {
         paths: [['W1', 'W5', 'W2'], ['W1', 'W2']], papers: [paper('W1', 0), paper('W5', 0), paper('W2', 0)],
         connections: [{ citing: 'W1', cited: 'W5' }, { citing: 'W5', cited: 'W2' }, { citing: 'W1', cited: 'W2' }],
@@ -116,24 +126,28 @@ function fakes(over: Over = {}) {
     },
   };
   const openalex = over.openalex ?? {
-    async search(query: string, opts: unknown) {
+    async search(query: string, { signal, ...opts }: { signal?: AbortSignal }) {
       calls.search.push({ query, opts });
+      calls.signals.push(signal);
       return over.search ? over.search() : { works: [work('W1'), work('W2', { abstract: null })], nextCursor: 'next-1' };
     },
-    async works(ids: string[]) {
+    async works(ids: string[], opts?: { signal?: AbortSignal }) {
       calls.works.push(ids);
+      calls.signals.push(opts?.signal);
       if (over.works) return over.works(ids);
       const found = ids.filter(i => KNOWN[i]).map(i => work(KNOWN[i]));
       return { works: found, unresolved: ids.filter(i => !KNOWN[i]).map(input => ({ input, reason: 'not_found' as const })) };
     },
-    async linked(ids: string[], direction: string, limit: number) {
+    async linked(ids: string[], direction: string, limit: number, opts?: { signal?: AbortSignal }) {
       calls.linked.push({ ids, direction, limit });
+      calls.signals.push(opts?.signal);
       return over.linked ? over.linked(ids, direction, limit) : { works: [work('W4'), work('W5')], total: 321 };
     },
   };
   const content = {
-    async readPaper(w: Work, offset: number, maxChars: number) {
+    async readPaper(w: Work, offset: number, maxChars: number, opts?: { signal?: AbortSignal }) {
       calls.readPaper.push({ id: w.id, offset, maxChars });
+      calls.signals.push(opts?.signal);
       return over.readPaper ? over.readPaper(w, offset, maxChars)
         : { text: 'Full text.', nextOffset: null, sha256: 'ab'.repeat(32), license: 'CC BY', links: [] };
     },
@@ -147,7 +161,7 @@ function fakes(over: Over = {}) {
   const settled: ToolSettled[] = [];
   const deps = {
     graph: graph as unknown as GraphClient, openalex: openalex as unknown as OpenAlexClient,
-    content: content as unknown as ContentClient, buildCap, version: '1.0.0', publicBaseUrl: BASE, now: () => NOW,
+    content: content as unknown as ContentClient, buildCap, version: '1.0.0', publicBaseUrl: BASE, now: over.now ?? (() => NOW),
     onToolSettled: (e: ToolSettled) => { settled.push(e); },
   };
   return { deps, calls, settled };
@@ -170,7 +184,9 @@ async function withClient<T>(over: Over, fn: (c: { call: (name: string, args: Re
   const { deps, calls, settled } = fakes(over);
   const { client, close } = await connect(deps, modern);
   try {
-    const call = async (name: string, args: Record<string, unknown>) => (await client.callTool({ name, arguments: args })) as unknown as Result;
+    // A long client timeout, so tests that move mocked timers past the ceiling don't trip the client's own.
+    const call = async (name: string, args: Record<string, unknown>) =>
+      (await client.callTool({ name, arguments: args }, { timeout: 3_600_000 })) as unknown as Result;
     return await fn({ call, calls, settled, client });
   } finally { await close(); }
 }
@@ -493,9 +509,11 @@ test('connect_hops_computed', async () => {
     assert.deepEqual(calls.resolve, [['10.x/doi-of-W1', 'W2']]);
     assert.deepEqual(calls.connector, [{ from: 'W1', to: 'W2', extended: true }]);
     const sc = r.structuredContent!;
-    assert.deepEqual(sc.provenance.hops, [2, 1]);
+    // Shortest path first.
+    assert.deepEqual(sc.provenance.hops, [1, 2]);
     assert.equal(sc.provenance.papers_searched, 812);
-    assert.deepEqual(sc.paths, [['W1', 'W5', 'W2'], ['W1', 'W2']]);
+    assert.deepEqual(sc.paths, [['W1', 'W2'], ['W1', 'W5', 'W2']]);
+    assert.equal(sc.truncated, false);
     assert.equal(sc.edges.length, 3);
     assert.deepEqual(sc.rows.map((p: any) => p.paper_id), ['W1', 'W5', 'W2']);
     assert.equal(sc.inciteful_url, 'https://incitefulmed.com/academic/c?from=W1&to=W2');
@@ -524,7 +542,7 @@ test('query_offset_cases', async () => {
     const sc = ok.structuredContent!;
     assert.equal(sc.provenance.sql_executed, 'SELECT paper_id FROM papers LIMIT 10');
     assert.equal(sc.provenance.effective_limit, 40);
-    assert.ok(sc.diagnostics.advisories.includes('graph-api applies LIMIT 40 in place of the query\'s LIMIT'));
+    assert.ok(sc.diagnostics.advisories.includes('graph-api applies LIMIT 40 in place of the query\'s LIMIT.'));
     assert.equal(sc.inciteful_url, 'https://incitefulmed.com/academic/p/q?ids[]=W1&ids[]=W2&sql=SELECT%20paper_id%20FROM%20papers%20LIMIT%2010');
     // User rows are returned as they are.
     assert.deepEqual(sc.rows[0].authors, JSON.stringify([{ name: 'Ann' }, { name: 'Bo' }, { name: 'Cy' }, { name: 'Di' }]));
@@ -583,7 +601,26 @@ test('build cap keys and deadline', async () => {
       ['query', ['W1', 'W2'], 'SELECT 1', 9], ['metadata', ['W1', 'W2']],
       ['connector', 'W1', 'W2', false],
     ]);
-    assert.ok(calls.cap.every(c => c.deadlineAt === NOW.getTime() + 90_000));
+    // On a still clock: builds get now + 90 s; metadata waits min(deadline, now + 5 s).
+    assert.deepEqual(calls.cap.map(c => c.deadlineAt - NOW.getTime()), [90_000, 90_000, 90_000, 5_000, 90_000, 5_000, 90_000]);
+  });
+});
+
+test('deadline_computed_once_per_call', async () => {
+  // A clock that moves 1 s on every read. Were the deadline re-read at a build, it would drift.
+  let reads = 0;
+  const now = () => new Date(NOW.getTime() + 1000 * reads++);
+  await withClient({ now, metadata: async () => GRAPH_META }, async ({ call, calls }) => {
+    await call('query_citation_graph', { seeds: ['W1'], sql: 'SELECT 1' });
+    const [build, metadata] = calls.cap.map(c => c.deadlineAt);
+    // The first read of the call (reads = 0) plus the ceiling.
+    assert.equal(build, NOW.getTime() + 90_000);
+    // Metadata: a later read plus 5 s, still under the call's deadline.
+    assert.ok(metadata < build && (metadata - NOW.getTime() - 5_000) % 1000 === 0);
+    reads = 0;
+    calls.cap.length = 0;
+    await call('explore_citation_network', { seeds: ['W1'], analysis: 'important' });
+    assert.equal(calls.cap[0].deadlineAt, NOW.getTime() + 90_000);
   });
 });
 
@@ -618,6 +655,7 @@ test('get_papers and search_literature rows', async () => {
     });
     const s = await call('search_literature', { query: 'vagus', limit: 5, year_from: 2010, open_access: true, cursor: 'abc' });
     assert.deepEqual(calls.search, [{ query: 'vagus', opts: { limit: 5, cursor: 'abc', yearFrom: 2010, yearTo: undefined, openAccess: true } }]);
+    assert.ok(calls.signals.length === 2 && calls.signals.every(sig => sig instanceof AbortSignal && !sig.aborted), 'non-build calls get the call signal');
     assert.equal(s.structuredContent!.next_cursor, 'next-1');
     assert.deepEqual(s.structuredContent!.rows[1], {
       openalex_id: 'W2', doi: '10.1/w2', title: 'Title of W2', year: 2020, venue: 'Journal of Tests', cited_by_count: 10,
@@ -631,6 +669,7 @@ test('read_paper', async () => {
     const r = await call('read_paper', { id: 'W1', offset: 10, max_chars: 500 });
     assert.deepEqual(calls.works, [['W1']]);
     assert.deepEqual(calls.readPaper, [{ id: 'W1', offset: 10, maxChars: 500 }]);
+    assert.ok(calls.signals.length === 2 && calls.signals.every(sig => sig instanceof AbortSignal), 'works and readPaper get the call signal');
     const sc = r.structuredContent!;
     assert.equal(sc.text, 'Full text.');
     assert.equal(sc.offset, 10);
@@ -815,5 +854,138 @@ test('prompt_requires_topic_or_seeds', async () => {
     ]) assert.ok(body.includes(step), step);
     const topicOnly = await client.getPrompt({ name: 'literature_review', arguments: { topic: 'sleep' } });
     assert.doesNotMatch((topicOnly.messages[0].content as { text: string }).text, /Seed papers:/);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// The per-call ceiling (TOOL_CEILING_MS + GRACE_MS) and connector trimming
+
+/** Lets the in-process HTTP exchange and promise chains run (setImmediate isn't mocked). */
+const settle = async (rounds = 20) => { for (let i = 0; i < rounds; i++) await new Promise(r => setImmediate(r)); };
+
+test('ceiling_aborts_a_hung_resolve', async () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    let seen: AbortSignal | undefined;
+    let reached!: () => void;
+    const started = new Promise<void>(r => { reached = r; });
+    await withClient({ resolve: (_inputs, signal) => { seen = signal; reached(); return new Promise(() => {}); } }, async ({ call, settled }) => {
+      const pending = call('find_similar_papers', { seeds: ['W1'] });
+      await started;
+      mock.timers.tick(90_000);
+      await settle();
+      assert.equal(seen?.aborted, false, 'not aborted at the ceiling itself: the grace runs first');
+      mock.timers.tick(1_000);
+      const r = await pending;
+      assert.ok(r.isError);
+      assert.equal(text(r), 'The request took too long upstream; retry in about a minute.');
+      assert.equal(seen?.aborted, true, 'the hung call saw the abort');
+      await settle();
+      assert.deepEqual(settled.map(e => e.outcome), ['timeout'], 'settled once');
+    });
+  } finally { mock.timers.reset(); }
+});
+
+test('a_build_past_the_deadline_reports_still_building', async () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    // Like BuildCap: rejects at the deadline but leaves fn running (it never settles here).
+    const cap: BuildCapLike = {
+      run<T>(_key: string, fn: () => Promise<T>, deadlineAt: number) {
+        void fn();
+        return new Promise<T>((_, reject) => setTimeout(() => reject(new BuildDeadlineError()), deadlineAt - NOW.getTime()));
+      },
+    };
+    let reached!: () => void;
+    const started = new Promise<void>(r => { reached = r; });
+    await withClient({ cap, similar: () => { reached(); return new Promise(() => {}); } }, async ({ call, calls, settled }) => {
+      const pending = call('find_similar_papers', { seeds: ['W1'] });
+      await started;
+      mock.timers.tick(90_000);
+      await settle();
+      mock.timers.tick(1_000);
+      const r = await pending;
+      assert.equal(text(r), 'The graph is still building; retry in about a minute.');
+      assert.deepEqual(settled.map(e => e.outcome), ['timeout']);
+      assert.deepEqual(calls.buildExtra, [], 'the build never received a signal');
+    });
+  } finally { mock.timers.reset(); }
+});
+
+test('a_late_rejection_after_the_ceiling_is_handled', async () => {
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+  process.on('unhandledRejection', onUnhandled);
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    let fail!: (err: Error) => void;
+    let reached!: () => void;
+    const started = new Promise<void>(r => { reached = r; });
+    await withClient({ resolve: () => { reached(); return new Promise((_, reject) => { fail = reject; }); } }, async ({ call }) => {
+      const pending = call('find_similar_papers', { seeds: ['W1'] });
+      await started;
+      mock.timers.tick(91_000);
+      assert.equal(text(await pending), 'The request took too long upstream; retry in about a minute.');
+      fail(new GraphUnavailableError(null));
+      await settle();
+    });
+    assert.deepEqual(unhandled, []);
+  } finally {
+    mock.timers.reset();
+    process.off('unhandledRejection', onUnhandled);
+  }
+});
+
+test('connector_output_capped_without_dangling_references', async () => {
+  // 1,000 paths of 3 to 6 nodes between W1 and W2, through 3,000 distinct middle papers.
+  const paths: string[][] = [];
+  const papers = new Map<string, SimilarPaper>([['W1', paper('W1', 0)], ['W2', paper('W2', 0)]]);
+  const connections: Array<{ citing: string; cited: string }> = [];
+  for (let i = 0; i < 1000; i++) {
+    const middle = Array.from({ length: 1 + ((999 - i) % 4) }, (_, j) => `W${10_000 + i * 4 + j}`);
+    const path = ['W1', ...middle, 'W2'];
+    paths.push(path);
+    for (const id of middle) papers.set(id, { ...paper(id, 0), title: `A fairly long title for paper ${id} in the connector` });
+    for (let j = 1; j < path.length; j++) connections.push({ citing: path[j - 1], cited: path[j] });
+  }
+  const connector = async () => ({ paths, papers: [...papers.values()], connections, num_paths: 1000, papers_searched: 50_000, max_hops: 5 });
+  await withClient({ connector }, async ({ call }) => {
+    const r = await call('connect_papers', { from: 'W1', to: 'W2', extended: true });
+    assert.ok(Buffer.byteLength(text(r)) <= 60_000);
+    const sc = r.structuredContent!;
+    assert.equal(sc.truncated, true);
+    const k = sc.paths.length;
+    assert.ok(k > 10 && k < 1000);
+    assert.ok(sc.diagnostics.advisories.includes(`Showing ${k} of 1000 paths (shortest first); the longer ones were left out to fit the output size.`));
+    const lengths = sc.paths.map((p: string[]) => p.length);
+    assert.deepEqual(lengths, [...lengths].sort((a: number, b: number) => a - b), 'shortest first');
+    assert.deepEqual(sc.provenance.hops, lengths.map((n: number) => n - 1));
+    const rowIds = new Set(sc.rows.map((p: any) => p.paper_id));
+    for (const p of sc.paths) for (const id of p) assert.ok(rowIds.has(id), `path node ${id} in rows`);
+    for (const e of sc.edges) assert.ok(rowIds.has(e.citing) && rowIds.has(e.cited), 'edge endpoints in rows');
+    const onPaths = new Set(sc.paths.flat());
+    assert.equal(sc.rows.length, onPaths.size, 'no paper off the kept paths');
+    assert.equal(sc.diagnostics.advisories.filter((a: string) => a.startsWith('Output truncated')).length, 0, 'capResult had nothing left to trim');
+  });
+});
+
+test('error_mapping_after_review', async () => {
+  // A 400 from resolve is not a SQL error, even in query_citation_graph.
+  await withClient({ resolve: async () => { throw new GraphError(400, 'bad ids[]'); } }, async ({ call, settled }) => {
+    const r = await call('query_citation_graph', { seeds: ['W1'], sql: 'SELECT 1' });
+    assert.equal(text(r), 'The citation graph service returned an error.');
+    assert.equal(settled[0].outcome, 'upstream_unavailable');
+  });
+  await withClient({}, async ({ call }) => {
+    const longSql = await call('query_citation_graph', { seeds: ['W1'], sql: `SELECT ${'1'.repeat(10_000)}` });
+    assert.match(text(longSql), /Input validation error/);
+    assert.ok(!(await call('query_citation_graph', { seeds: ['W1'], sql: `SELECT ${'1'.repeat(9_993)}` })).isError);
+    assert.match(text(await call('search_literature', { query: 'q'.repeat(1_001) })), /Input validation error/);
+    assert.ok(!(await call('search_literature', { query: 'q'.repeat(1_000) })).isError);
+    // More than 10 unresolved seeds: one advisory, every seed still listed.
+    const sc = (await call('find_similar_papers', { seeds: ['W1', ...Array.from({ length: 12 }, (_, i) => `nope${i}`)] })).structuredContent!;
+    assert.equal(sc.diagnostics.unresolved_seeds.length, 12);
+    assert.ok(sc.diagnostics.advisories.includes('12 seeds unresolved; see unresolved_seeds.'));
+    assert.equal(sc.diagnostics.advisories.filter((a: string) => a.startsWith('Seed "')).length, 0);
   });
 });

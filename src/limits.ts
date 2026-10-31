@@ -3,6 +3,13 @@
 
 /** Ceiling on one tool call. The graph call behind a timed-out tool call keeps running upstream. */
 export const TOOL_CEILING_MS = 90_000;
+/**
+ * Added to the ceiling before a tool call's non-build work is aborted, so a build that reaches the
+ * deadline reports "still building" (the build cap's error) rather than the generic timeout.
+ */
+export const GRACE_MS = 1_000;
+/** Longest wait for a graph's `metadata` after its query; the stats are dropped when it runs out. */
+export const METADATA_WAIT_MS = 5_000;
 /** Graph builds in flight at once. A build is any call to `/query`, `/paper/similar` or `/connector`. */
 export const BUILD_CAP = 4;
 
@@ -14,6 +21,9 @@ export const MAX_SEEDS = 500;
 export const MAX_SEARCH_LIMIT = 50;
 export const MAX_ANALYSIS_LIMIT = 100;
 export const MAX_SQL_LIMIT = 500;
+/** Characters in `query_citation_graph`'s `sql` and `search_literature`'s `query`. */
+export const MAX_SQL_CHARS = 10_000;
+export const MAX_QUERY_CHARS = 1_000;
 /** `read_paper`'s `max_chars`. */
 export const MAX_READ_CHARS = 50_000;
 /** Serialized result size (`Buffer.byteLength` of the JSON) above which rows are trimmed. */

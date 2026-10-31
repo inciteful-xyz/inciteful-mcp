@@ -10,8 +10,9 @@ const size = (v: unknown) => Buffer.byteLength(JSON.stringify(v));
  * trimmed. A trimmed result gets `truncated: true` and the advisory in `diagnostics.advisories` (a
  * `diagnostics` block is added when the result has none). The input is not mutated.
  */
-export function capResult<T extends { rows: unknown[] }>(value: T, maxBytes = MAX_OUTPUT_BYTES): T & { truncated: boolean } {
-  const whole = { ...value, truncated: false };
+export function capResult<T extends { rows: unknown[]; truncated?: boolean }>(value: T, maxBytes = MAX_OUTPUT_BYTES): T & { truncated: boolean } {
+  // A tool that already trimmed its own output (connect_papers' paths) passes truncated: true through.
+  const whole = { ...value, truncated: value.truncated === true };
   if (size(whole) <= maxBytes) return whole;
 
   const diagnostics = (value as { diagnostics?: { advisories?: string[] } }).diagnostics;

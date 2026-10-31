@@ -104,7 +104,7 @@ test('advisory_title_filter', () => {
 
 test('advisory_user_limit_replaced', () => {
   const a = advisories({ sqlExecuted: 'SELECT * FROM papers LIMIT 1000', effectiveLimit: 500 });
-  assert.deepEqual(a, ["graph-api applies LIMIT 500 in place of the query's LIMIT", ALWAYS]);
+  assert.deepEqual(a, ["graph-api applies LIMIT 500 in place of the query's LIMIT.", ALWAYS]);
   assert.deepEqual(advisories({ sqlExecuted: 'SELECT * FROM papers limit 500', effectiveLimit: 500 }), [ALWAYS]);
   assert.deepEqual(advisories({ sqlExecuted: 'SELECT * FROM papers', effectiveLimit: 500 }), [ALWAYS]);
   // Only a trailing top-level LIMIT counts; one inside a subquery or CTE never does.
@@ -116,7 +116,7 @@ test('advisory_user_limit_replaced', () => {
   assert.deepEqual(advisories({ sqlExecuted: 'SELECT * FROM (SELECT * FROM papers LIMIT 3)', effectiveLimit: 5 }), [ALWAYS]);
   assert.deepEqual(advisories({
     sqlExecuted: 'WITH top AS (SELECT * FROM papers LIMIT 50) SELECT * FROM top LIMIT 7', effectiveLimit: 5,
-  }), ["graph-api applies LIMIT 5 in place of the query's LIMIT", ALWAYS]);
+  }), ["graph-api applies LIMIT 5 in place of the query's LIMIT.", ALWAYS]);
   assert.deepEqual(advisories({ sqlExecuted: '  SELECT * FROM papers\n LIMIT 7 ;\n', effectiveLimit: 5 }).length, 2);
 });
 
@@ -180,4 +180,13 @@ test('data_source_exact', () => {
 
 test('retrieved_at_from_injected_now', () => {
   assert.equal(prov({ now: new Date('2027-01-02T03:04:05.678Z') }).retrieved_at, '2027-01-02T03:04:05Z');
+});
+
+test('many_unresolved_seeds_collapse_into_one_advisory', () => {
+  const unresolved = (n: number): SeedResolution[] => Array.from({ length: n }, (_, i) => ({ input: `x${i}`, id: null, reason: 'not_found' as const }));
+  const ten = build({ seeds: [...three, ...unresolved(10)] });
+  assert.equal(ten.diagnostics.advisories.filter(a => a.startsWith('Seed "')).length, 10);
+  const eleven = build({ seeds: [...three, ...unresolved(11)] });
+  assert.deepEqual(eleven.diagnostics.advisories, ['11 seeds unresolved; see unresolved_seeds.', ALWAYS]);
+  assert.equal(eleven.diagnostics.unresolved_seeds.length, 11);
 });

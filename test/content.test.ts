@@ -111,3 +111,17 @@ test('failed or unusable PMC responses fall back to candidate links', async () =
   assert.equal(rejected.text, undefined);
   assert.equal(rejected.sha256, null);
 });
+
+test('readPaper passes the caller signal to the PMC download', async () => {
+  const seen: Array<AbortSignal | null | undefined> = [];
+  const fetcher = (async (_input: string | URL | Request, init?: RequestInit) => {
+    seen.push(init?.signal);
+    throw init?.signal?.reason ?? new Error('no signal');
+  }) as typeof fetch;
+  const ac = new AbortController();
+  ac.abort(new Error('ceiling'));
+  const result = await new ContentClient(fetcher).readPaper(work, 0, 100, { signal: ac.signal });
+  assert.equal(result.text, undefined);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0]?.aborted, true);
+});

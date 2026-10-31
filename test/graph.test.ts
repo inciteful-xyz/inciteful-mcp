@@ -53,8 +53,36 @@ test('falls_back_only_on_connection_error', async () => {
 test('secondary_tried_at_most_once', async () => {
   const error = connectionError('ECONNREFUSED');
   const { fetcher, calls } = fake(() => { throw error; });
-  await assert.rejects(new GraphClient(cfg, fetcher).resolve(['W1']), (err: unknown) => err === error);
+  // No HTTP response from either: unavailable, with no retry time.
+  await assert.rejects(new GraphClient(cfg, fetcher).resolve(['W1']),
+    (err: unknown) => err instanceof GraphUnavailableError && err.retryAfterSecs === null);
   assert.deepEqual(calls.map(c => c.url.host), ['primary.test', 'secondary.test']);
+});
+
+test('caller_abort_is_rethrown_without_fallback', async () => {
+  const ac = new AbortController();
+  ac.abort(new Error('ceiling'));
+  // Even a connection-style rejection is final once the caller's signal has aborted.
+  const error = connectionError('ECONNRESET');
+  const { fetcher, calls } = fake(() => { throw error; });
+  await assert.rejects(new GraphClient(cfg, fetcher).resolve(['W1'], { signal: ac.signal }), (err: unknown) => err === error);
+  assert.deepEqual(calls.map(c => c.url.host), ['primary.test']);
+});
+
+test('resolve_passes_a_signal_with_its_own_timeout', async () => {
+  const signals: Array<AbortSignal | null | undefined> = [];
+  const fetcher = (async (_input: string | URL | Request, init?: RequestInit) => {
+    signals.push(init?.signal);
+    return json([{ input: 'W1', id: 'W1', reason: null }]);
+  }) as typeof fetch;
+  await new GraphClient(cfg, fetcher).resolve(['W1']);
+  await new GraphClient(cfg, fetcher).resolve(['W1'], { signal: new AbortController().signal });
+  assert.ok(signals.every(s => s instanceof AbortSignal && !s.aborted));
+  // Builds carry no signal: aborting one would cancel the graph build upstream.
+  signals.length = 0;
+  const builds = (async (_input: string | URL | Request, init?: RequestInit) => { signals.push(init?.signal); return json([]); }) as typeof fetch;
+  await new GraphClient(cfg, builds).query(['W1'], 'SELECT 1', 5);
+  assert.deepEqual(signals, [undefined]);
 });
 
 test('no_fallback_on_headers_timeout_or_abort', async () => {
@@ -64,7 +92,8 @@ test('no_fallback_on_headers_timeout_or_abort', async () => {
   for (const error of [headersTimeout, abort, plain]) {
     const { fetcher, calls } = fake(() => { throw error; });
     const graph = new GraphClient(cfg, fetcher);
-    await assert.rejects(graph.query(['W1', 'W2'], 'SELECT 1', 5), (err: unknown) => err === error);
+    await assert.rejects(graph.query(['W1', 'W2'], 'SELECT 1', 5),
+      (err: unknown) => err instanceof GraphUnavailableError && err.retryAfterSecs === null);
     assert.deepEqual(calls.map(c => c.url.host), ['primary.test']);
   }
 });

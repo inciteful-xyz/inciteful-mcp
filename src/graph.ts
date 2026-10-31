@@ -14,6 +14,8 @@ const PRUNE = '10000';
 const METADATA_LIMIT = 100;
 /** Bound on the 400 body carried as `GraphError.detail`. */
 const MAX_DETAIL_CHARS = 2000;
+/** Per-request timeout on `resolve`, which is never a graph build (builds are bounded by the build cap). */
+const RESOLVE_TIMEOUT_MS = 30_000;
 
 const resolutionSchema = z.array(z.object({
   input: z.string(), id: z.string().nullable(), reason: z.enum(['not_found', 'unavailable']).nullable(),
@@ -79,19 +81,26 @@ export class GraphClient {
    * Sends to the primary, and once to the secondary only when the primary could not be reached.
    * Any HTTP status is final, and so is any other rejection (headers timeout, abort): the request
    * may already be building a graph upstream, and a retry would start a duplicate build.
+   * A rejection with no HTTP response becomes `GraphUnavailableError(null)`, except when the caller's
+   * own `caller` signal aborted it: that abort is rethrown as it is, so the caller can tell it apart.
    */
-  async #request(path: string, params: URLSearchParams, init: RequestInit = {}): Promise<{ res: Response; meta: GraphMeta }> {
+  async #request(path: string, params: URLSearchParams, init: RequestInit = {}, caller?: AbortSignal): Promise<{ res: Response; meta: GraphMeta }> {
     const send = (base: URL) => {
       const url = new URL(path, base);
       url.search = params.toString();
       return this.#fetch(url, { ...init, redirect: 'error' });
     };
+    const unavailable = (err: unknown) => (caller?.aborted ? err : new GraphUnavailableError(null));
     let res: Response;
     try {
       res = await send(this.#primary);
     } catch (err) {
-      if (!isConnectionError(err)) throw err;
-      res = await send(this.#secondary);
+      if (init.signal?.aborted || !isConnectionError(err)) throw unavailable(err);
+      try {
+        res = await send(this.#secondary);
+      } catch (second) {
+        throw unavailable(second);
+      }
     }
     const meta: GraphMeta = { snapshot: header(res, 'x-graph-snapshot'), recentTier: header(res, 'x-graph-recent-tier') };
     this.lastMeta = meta;
@@ -109,8 +118,8 @@ export class GraphClient {
     throw new GraphError(res.status);
   }
 
-  async #json<T>(schema: z.ZodType<T>, path: string, params: URLSearchParams, init?: RequestInit): Promise<{ data: T; meta: GraphMeta }> {
-    const { res, meta } = await this.#request(path, params, init);
+  async #json<T>(schema: z.ZodType<T>, path: string, params: URLSearchParams, init?: RequestInit, caller?: AbortSignal): Promise<{ data: T; meta: GraphMeta }> {
+    const { res, meta } = await this.#request(path, params, init, caller);
     let body: unknown;
     try { body = await res.json(); } catch { throw new GraphError(res.status); }
     const parsed = schema.safeParse(body);
@@ -118,12 +127,19 @@ export class GraphClient {
     return { data: parsed.data, meta };
   }
 
-  /** Resolves inputs to OpenAlex W ids, in input order. `resolve([])` makes one request (fills `lastMeta`). */
-  async resolve(inputs: string[]): Promise<{ results: SeedResolution[] } & GraphMeta> {
+  /**
+   * Resolves inputs to OpenAlex W ids, in input order. `resolve([])` makes one request (fills `lastMeta`).
+   * Each request has its own timeout; `signal` (the tool call's ceiling) aborts them all.
+   */
+  async resolve(inputs: string[], opts: { signal?: AbortSignal } = {}): Promise<{ results: SeedResolution[] } & GraphMeta> {
     const batches: string[][] = [];
     for (let i = 0; i < inputs.length; i += RESOLVE_BATCH) batches.push(inputs.slice(i, i + RESOLVE_BATCH));
     if (!batches.length) batches.push([]);
-    const answers = await Promise.all(batches.map(batch => this.#json(resolutionSchema, 'openalex/resolve', withIds(batch))));
+    const answers = await Promise.all(batches.map(batch => {
+      const timeout = AbortSignal.timeout(RESOLVE_TIMEOUT_MS);
+      const signal = opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout;
+      return this.#json(resolutionSchema, 'openalex/resolve', withIds(batch), { signal }, opts.signal);
+    }));
     return { results: answers.flatMap(a => a.data), ...answers[answers.length - 1].meta };
   }
 

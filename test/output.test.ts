@@ -57,3 +57,9 @@ test('measures_bytes_not_chars', () => {
   assert.ok(bytes(out) <= 60_000);
   assert.ok(out.rows.length < 30 && out.rows.length >= 19);
 });
+
+test('an incoming truncated: true is kept', () => {
+  assert.equal(capResult({ rows: [1], truncated: true }).truncated, true);
+  assert.equal(capResult({ rows: [1], truncated: false }).truncated, false);
+  assert.equal(capResult({ rows: [1] }).truncated, false);
+});

@@ -199,10 +199,10 @@ export class OpenAlexClient {
   toJSON() { return {}; }
 
   /**
-   * One `/works` request. Errors carry only a status: never the URL (search terms), the response
+   * One `/works` request, bounded by its own timeout and by the caller's `signal`. Errors carry only a status: never the URL (search terms), the response
    * body or a rejection's message, any of which could echo the request or the key.
    */
-  async #works(params: Record<string, string>): Promise<Page> {
+  async #works(params: Record<string, string>, signal?: AbortSignal): Promise<Page> {
     const url = new URL(WORKS_URL);
     url.search = new URLSearchParams({ ...params, select: SELECT, corpus: 'all' }).toString();
     const counter = requestCounter.getStore();
@@ -211,7 +211,8 @@ export class OpenAlexClient {
     try {
       res = await this.#fetch(url, {
         headers: { Authorization: `Bearer ${this.#key}`, Accept: 'application/json' },
-        redirect: 'error', signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        redirect: 'error',
+        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]) : AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
     } catch {
       throw new OpenAlexError(0);
@@ -236,14 +237,14 @@ export class OpenAlexClient {
   }
 
   /** Relevance search. `openAccess: true` keeps only open-access works; `false` or absent applies no filter. */
-  async search(query: string, opts: { limit: number; cursor?: string; yearFrom?: number; yearTo?: number; openAccess?: boolean }): Promise<{ works: Work[]; nextCursor: string | null }> {
+  async search(query: string, opts: { limit: number; cursor?: string; yearFrom?: number; yearTo?: number; openAccess?: boolean; signal?: AbortSignal }): Promise<{ works: Work[]; nextCursor: string | null }> {
     const filters: string[] = [];
     if (opts.yearFrom !== undefined) filters.push(`from_publication_date:${opts.yearFrom}-01-01`);
     if (opts.yearTo !== undefined) filters.push(`to_publication_date:${opts.yearTo}-12-31`);
     if (opts.openAccess) filters.push('is_oa:true');
     const params: Record<string, string> = { search: query, 'per-page': String(opts.limit), cursor: opts.cursor ?? '*' };
     if (filters.length) params.filter = filters.join(',');
-    const { works, nextCursor } = await this.#works(params);
+    const { works, nextCursor } = await this.#works(params, opts.signal);
     return { works, nextCursor };
   }
 
@@ -251,13 +252,13 @@ export class OpenAlexClient {
    * Batch lookup by W id, DOI, PMID or PMCID, at most 100 OR-values per request. Works come back in
    * input order, once each. Unparseable inputs are `not_found`; inputs of a failed request are `unavailable`.
    */
-  async works(ids: string[]): Promise<{ works: Work[]; unresolved: Unresolved[] }> {
+  async works(ids: string[], opts: { signal?: AbortSignal } = {}): Promise<{ works: Work[]; unresolved: Unresolved[] }> {
     const parsed = ids.map(parseInput);
     const byKind = new Map<Kind, Set<string>>();
     for (const p of parsed) if (p) byKind.set(p.kind, (byKind.get(p.kind) ?? new Set()).add(p.value));
     const batches = [...byKind].flatMap(([kind, values]) => chunks([...values], MAX_OR_VALUES).map(group => ({ kind, group })));
     const settled = await Promise.allSettled(batches.map(({ kind, group }) =>
-      this.#works({ filter: `${kind}:${group.join('|')}`, 'per-page': String(MAX_PER_PAGE) })));
+      this.#works({ filter: `${kind}:${group.join('|')}`, 'per-page': String(MAX_PER_PAGE) }, opts.signal)));
 
     const found = new Map<string, Work>();
     const failed = new Set<string>();
@@ -288,12 +289,12 @@ export class OpenAlexClient {
    * References (`cited_by:`) or citations (`cites:`) of the given works, by global `cited_by_count`.
    * One request gives OpenAlex's `total`; several are merged, deduplicated and cut, with `total` null.
    */
-  async linked(ids: string[], direction: 'references' | 'citations', limit: number): Promise<{ works: Work[]; total: number | null }> {
+  async linked(ids: string[], direction: 'references' | 'citations', limit: number, opts: { signal?: AbortSignal } = {}): Promise<{ works: Work[]; total: number | null }> {
     const filter = direction === 'references' ? 'cited_by' : 'cites';
     const values = [...new Set(ids.map(normalizeId).filter(id => /^W\d+$/.test(id)))];
     if (!values.length) return { works: [], total: 0 };
     const pages = await Promise.all(chunks(values, MAX_OR_VALUES).map(group =>
-      this.#works({ filter: `${filter}:${group.join('|')}`, sort: 'cited_by_count:desc', 'per-page': String(limit) })));
+      this.#works({ filter: `${filter}:${group.join('|')}`, sort: 'cited_by_count:desc', 'per-page': String(limit) }, opts.signal)));
     if (pages.length === 1) return { works: pages[0].works, total: pages[0].count };
     const merged = new Map<string, Work>();
     for (const work of pages.flatMap(p => p.works)) if (!merged.has(work.id)) merged.set(work.id, work);

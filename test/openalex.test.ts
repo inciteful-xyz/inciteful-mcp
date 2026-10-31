@@ -280,3 +280,23 @@ test('countOpenAlexRequests counts each request in its own async context', async
   // Outside a counter nothing breaks.
   await client.search('q', { limit: 1 });
 });
+
+test('caller_signal_reaches_every_request', async () => {
+  const seen: Array<AbortSignal | null | undefined> = [];
+  const fetcher = (async (_input: string | URL | Request, init?: RequestInit) => {
+    seen.push(init?.signal);
+    if (init?.signal?.aborted) throw init.signal.reason;
+    return page([raw('W1')]);
+  }) as typeof fetch;
+  const client = new OpenAlexClient(KEY, fetcher);
+  const ac = new AbortController();
+  ac.abort(new Error('ceiling'));
+  await assert.rejects(client.search('q', { limit: 1, signal: ac.signal }), OpenAlexError);
+  await assert.rejects(client.linked(['W1'], 'citations', 5, { signal: ac.signal }), OpenAlexError);
+  // works() marks the failed batch unavailable; nothing came back, so nothing resolves.
+  assert.deepEqual((await client.works(['W1'], { signal: ac.signal })).unresolved, [{ input: 'W1', reason: 'unavailable' }]);
+  assert.ok(seen.every(s => s?.aborted), 'every request saw the aborted caller signal');
+  seen.length = 0;
+  await client.search('q', { limit: 1 });
+  assert.ok(seen[0] instanceof AbortSignal && !seen[0].aborted, 'own timeout signal without a caller signal');
+});
