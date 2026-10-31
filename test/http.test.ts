@@ -655,6 +655,6 @@ test('page_assets_are_allowlisted_and_present', () => {
   for (const page of Object.values(realPages)) {
     for (const m of page(ctx).matchAll(/\/academic\/mcp\/assets\/([^"')?\s]+)/g)) referenced.add(m[1]);
   }
-  assert.deepEqual([...referenced].sort(), ['dm-sans-latin-ext-wght-normal.woff2', 'dm-sans-latin-wght-normal.woff2', 'favicon.svg', 'icon.png', 'og.png']);
+  assert.deepEqual([...referenced].sort(), ['battambang-latin-400-normal.woff2', 'dm-sans-latin-ext-wght-normal.woff2', 'dm-sans-latin-wght-normal.woff2', 'favicon.svg', 'icon.png', 'logo-300.png', 'og.png']);
   for (const name of referenced) assert.ok(Object.hasOwn(ASSETS, name), name);
 });

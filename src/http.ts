@@ -41,9 +41,12 @@ export const ASSETS: Readonly<Record<string, { file: string; type: string; cache
   'favicon.svg': { file: 'favicon.svg', type: 'image/svg+xml', cache: CACHE_DAY },
   'icon.png': { file: 'icon.png', type: 'image/png', cache: CACHE_DAY },
   'og.png': { file: 'og.png', type: 'image/png', cache: CACHE_DAY },
+  'logo-300.png': { file: 'logo-300.png', type: 'image/png', cache: CACHE_DAY },
   'dm-sans-latin-wght-normal.woff2': { file: 'dm-sans-latin-wght-normal.woff2', type: 'font/woff2', cache: CACHE_IMMUTABLE },
   'dm-sans-latin-ext-wght-normal.woff2': { file: 'dm-sans-latin-ext-wght-normal.woff2', type: 'font/woff2', cache: CACHE_IMMUTABLE },
+  'battambang-latin-400-normal.woff2': { file: 'battambang-latin-400-normal.woff2', type: 'font/woff2', cache: CACHE_IMMUTABLE },
   'DM-Sans-OFL.txt': { file: 'DM-Sans-OFL.txt', type: 'text/plain; charset=utf-8', cache: CACHE_DAY },
+  'Battambang-OFL.txt': { file: 'Battambang-OFL.txt', type: 'text/plain; charset=utf-8', cache: CACHE_DAY },
 };
 
 /** On every HTML page. */
