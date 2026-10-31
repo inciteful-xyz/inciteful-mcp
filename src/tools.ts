@@ -11,7 +11,7 @@ import {
 } from './errors.js';
 import type { ConnectorPaper, GraphClient, SimilarPaper } from './graph.js';
 import {
-  DEFAULT_SQL_LIMIT, GRACE_MS, MAX_ANALYSIS_LIMIT, MAX_ID_CHARS, MAX_PAPER_IDS, MAX_QUERY_CHARS, MAX_READ_CHARS, MAX_SEARCH_LIMIT, MAX_SEEDS, MAX_SQL_CHARS, MAX_SQL_LIMIT,
+  DEFAULT_SQL_LIMIT, GRACE_MS, MAX_ANALYSIS_LIMIT, MAX_ID_CHARS, MAX_PAPER_IDS, MAX_QUERY_CHARS, MAX_READ_CHARS, MAX_SEARCH_LIMIT, MAX_SEEDS, MAX_SQL_CHARS, MAX_SQL_LIMIT, MIN_SQL_LIMIT,
   METADATA_WAIT_MS, OUTPUT_CAP_BYTES, TOOL_CEILING_MS, URL_SEED_CAP, type ToolName,
 } from './limits.js';
 import { countOpenAlexRequests, type OpenAlexClient, type Work } from './openalex.js';
@@ -603,7 +603,7 @@ export function createServerFactory(deps: ToolDeps): McpServerFactory {
     register('query_citation_graph', z.object({
       seeds,
       sql: z.string().trim().min(1).max(MAX_SQL_CHARS).describe('A single SQLite SELECT statement.'),
-      limit: z.number().int().min(1).max(MAX_SQL_LIMIT).optional()
+      limit: z.number().int().min(MIN_SQL_LIMIT).max(MAX_SQL_LIMIT).optional()
         .describe(`Rows to return, at most ${MAX_SQL_LIMIT}. Default: the query's trailing LIMIT (capped at ${MAX_SQL_LIMIT}), else ${DEFAULT_SQL_LIMIT}.`),
     }), async (a, call) => {
       // Before any call. No quote-awareness: a false positive just asks for a rewrite.
@@ -612,7 +612,8 @@ export function createServerFactory(deps: ToolDeps): McpServerFactory {
       }
       // graph-api replaces the query's LIMIT with this one, so a LIMIT the caller wrote is kept unless overridden.
       const queryLimit = trailingLimit(a.sql);
-      const effectiveLimit = a.limit ?? (queryLimit === undefined ? DEFAULT_SQL_LIMIT : Math.min(queryLimit, MAX_SQL_LIMIT));
+      // A LIMIT taken from the query gets the same bounds as the argument.
+      const effectiveLimit = a.limit ?? (queryLimit === undefined ? DEFAULT_SQL_LIMIT : Math.max(MIN_SQL_LIMIT, Math.min(queryLimit, MAX_SQL_LIMIT)));
       const r = await resolveSeeds(a.seeds, call);
       const multiple = r.ids.length > 1;
       const link = r.ids.length ? urls.sqlUrl(r.inputOrder, a.sql) : null;

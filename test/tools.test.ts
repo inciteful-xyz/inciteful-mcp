@@ -558,6 +558,8 @@ test('query_honours_the_sql_limit_without_a_limit_argument', async () => {
     ['select paper_id from papers limit 7 ;', 7, 'select paper_id from papers LIMIT 7', null],
     // Capped at 500.
     ['SELECT paper_id FROM papers LIMIT 1000', 500, 'SELECT paper_id FROM papers LIMIT 500', "graph-api applies LIMIT 500 in place of the query's LIMIT 1000."],
+    // Floored at 1, the limit argument's minimum.
+    ['SELECT paper_id FROM papers LIMIT 0', 1, 'SELECT paper_id FROM papers LIMIT 1', "graph-api applies LIMIT 1 in place of the query's LIMIT 0."],
     // No LIMIT: the default, which graph-api adds to the query.
     ['SELECT paper_id FROM papers', 100, 'SELECT paper_id FROM papers LIMIT 100', null],
     ['SELECT paper_id FROM papers;', 100, 'SELECT paper_id FROM papers LIMIT 100', null],
