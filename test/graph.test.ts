@@ -37,7 +37,7 @@ const similarSample = [
 ];
 
 test('falls_back_only_on_connection_error', async () => {
-  for (const code of ['ECONNREFUSED', 'EHOSTUNREACH', 'ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET']) {
+  for (const code of ['ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH', 'ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'UND_ERR_CONNECT_TIMEOUT']) {
     const { fetcher, calls } = fake((call) => {
       if (call.url.host === 'primary.test') throw connectionError(code);
       return json([{ input: 'W1', id: 'W1', reason: null }], { 'X-Graph-Snapshot': '2026-10-15' });

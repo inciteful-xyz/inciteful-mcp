@@ -3,8 +3,14 @@ import type { Config } from './config.js';
 import { GraphError, GraphUnavailableError, QueryTimeoutError } from './errors.js';
 import type { CondensedPaper, GraphMeta, SeedResolution } from './types.js';
 
-/** Rejection codes (undici puts them on `err.cause.code`) meaning the primary was never reached. */
-const CONNECTION_CODES = new Set(['ECONNREFUSED', 'EHOSTUNREACH', 'ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET']);
+/**
+ * Rejection codes (undici puts them on `err.cause.code`) meaning the primary was never reached.
+ * UND_ERR_CONNECT_TIMEOUT: undici's connect timeout, e.g. while kube-proxy still sends the ClusterIP
+ * to a pod that has just gone.
+ */
+const CONNECTION_CODES = new Set([
+  'ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH', 'ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'UND_ERR_CONNECT_TIMEOUT',
+]);
 /** graph-api's exact 400 body when the user's SQL hits its time limit. */
 const TIME_LIMIT_BODY = 'Error: Query exceeded the time limit';
 /** Long DOIs make resolve URLs large, so inputs go 100 per request. */
