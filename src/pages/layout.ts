@@ -152,7 +152,7 @@ h3{font-size:1.05rem;margin:0 0 6px}
 .panels{flex:1 1 100%;margin-top:6px}
 .panel{display:none;background:#fff;border:1px solid #e6def5;border-radius:10px;padding:14px 18px}
 ${['claude', 'chatgpt', 'cursor', 'claude-code', 'vscode', 'other'].map(id => `#c-${id}:checked~.panels #p-${id}`).join(',')}{display:block}
-.panel h3{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.panel h2{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 .panel ol{margin:0;padding-left:1.3em}
 .panel li{margin:2px 0}
 .panel pre{background:#f5f1fb;color:var(--ink);border-radius:7px;padding:10px 12px;margin:8px 0;font-size:.85rem;white-space:pre-wrap;overflow-wrap:anywhere}

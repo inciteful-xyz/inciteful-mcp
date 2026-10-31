@@ -9,6 +9,7 @@ import { toNodeHandler } from '@modelcontextprotocol/node';
 import type { McpHttpHandler } from '@modelcontextprotocol/server';
 import type { Config } from './config.js';
 import { callerKey, USAGE_CLIENT_MAX_CHARS, type RateLimiter } from './limits.js';
+import { PAGE_CSP } from './pages/index.js';
 import type { ToolSettled } from './tools.js';
 import type { GraphMeta, Pages, UsageSink } from './types.js';
 
@@ -26,19 +27,31 @@ const CORS_PREFLIGHT = {
   'Access-Control-Max-Age': '86400',
 } as const;
 
+/** The font files never change in place; a new font gets a new name. */
+const CACHE_IMMUTABLE = 'public, max-age=31536000, immutable';
+/** Images and the licence can be replaced at launch under the same name, so they are cached a day. */
+const CACHE_DAY = 'public, max-age=86400';
+
 /**
- * Served asset names → file in `assetsDir` and its type. Only these names are served, so no request
- * path ever reaches the file system. `example.json` is read by the landing page, not served.
+ * Served asset names → file in `assetsDir`, its type and its cache policy. Only these names are
+ * served, so no request path ever reaches the file system. `example.json` is read by the landing
+ * page, not served.
  */
-export const ASSETS: Readonly<Record<string, { file: string; type: string }>> = {
-  'favicon.svg': { file: 'favicon.svg', type: 'image/svg+xml' },
-  'icon.png': { file: 'icon.png', type: 'image/png' },
-  'og.png': { file: 'og.png', type: 'image/png' },
-  'dm-sans-latin-wght-normal.woff2': { file: 'dm-sans-latin-wght-normal.woff2', type: 'font/woff2' },
-  'dm-sans-latin-ext-wght-normal.woff2': { file: 'dm-sans-latin-ext-wght-normal.woff2', type: 'font/woff2' },
-  'DM-Sans-OFL.txt': { file: 'DM-Sans-OFL.txt', type: 'text/plain; charset=utf-8' },
+export const ASSETS: Readonly<Record<string, { file: string; type: string; cache: string }>> = {
+  'favicon.svg': { file: 'favicon.svg', type: 'image/svg+xml', cache: CACHE_DAY },
+  'icon.png': { file: 'icon.png', type: 'image/png', cache: CACHE_DAY },
+  'og.png': { file: 'og.png', type: 'image/png', cache: CACHE_DAY },
+  'dm-sans-latin-wght-normal.woff2': { file: 'dm-sans-latin-wght-normal.woff2', type: 'font/woff2', cache: CACHE_IMMUTABLE },
+  'dm-sans-latin-ext-wght-normal.woff2': { file: 'dm-sans-latin-ext-wght-normal.woff2', type: 'font/woff2', cache: CACHE_IMMUTABLE },
+  'DM-Sans-OFL.txt': { file: 'DM-Sans-OFL.txt', type: 'text/plain; charset=utf-8', cache: CACHE_DAY },
 };
-const ASSET_CACHE = 'public, max-age=31536000, immutable';
+
+/** On every HTML page. */
+const PAGE_HEADERS = {
+  'Content-Security-Policy': PAGE_CSP,
+  'X-Content-Type-Options': 'nosniff',
+  'Referrer-Policy': 'strict-origin-when-cross-origin',
+} as const;
 
 /** On every MCP response, including the 413 and 500 that toNodeHandler builds itself. */
 const MCP_HEADERS = {
@@ -123,7 +136,7 @@ export function createApp(deps: AppDeps): (req: IncomingMessage, res: ServerResp
   /** HTML is noindex only off the production host. */
   const sendHtml = (req: IncomingMessage, res: ServerResponse, status: number, page: keyof Pages) => {
     const html = deps.pages[page]({ publicBaseUrl: deps.config.publicBaseUrl, ...deps.graphMeta() });
-    const headers: OutgoingHttpHeaders = { 'Content-Type': 'text/html; charset=utf-8', Vary: 'Accept', 'Cache-Control': 'no-cache' };
+    const headers: OutgoingHttpHeaders = { 'Content-Type': 'text/html; charset=utf-8', Vary: 'Accept', 'Cache-Control': 'no-cache', ...PAGE_HEADERS };
     if (hostOf(req) !== prodHost) headers['X-Robots-Tag'] = 'noindex';
     send(req, res, status, headers, html);
   };
@@ -180,7 +193,7 @@ export function createApp(deps: AppDeps): (req: IncomingMessage, res: ServerResp
       }
       assetCache.set(name, body);
     }
-    sendOther(req, res, 200, { 'Content-Type': asset.type, 'Cache-Control': ASSET_CACHE }, body);
+    sendOther(req, res, 200, { 'Content-Type': asset.type, 'Cache-Control': asset.cache, 'X-Content-Type-Options': 'nosniff' }, body);
   }
 
   async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {

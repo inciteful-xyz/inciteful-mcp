@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
+import { parseExample } from '../src/pages/landing.js';
 import { pages } from '../src/pages/index.js';
 import type { PageCtx } from '../src/types.js';
 
@@ -62,16 +64,32 @@ test('badges_exact', () => {
   assert.equal(badges.join(' · '), 'Free · No account · OpenAlex metadata (CC0) · Open-source server (MIT)');
 });
 
+/** Copy a reader or a search engine sees: visible text, meta and alt text, and JSON-LD strings. */
+function allCopy(html: string): string {
+  const attrs = [...html.matchAll(/\b(?:content|alt)="([^"]*)"/g)].map(m => decode(m[1]));
+  const ld: string[] = [];
+  const walk = (v: unknown): void => {
+    if (typeof v === 'string') ld.push(v);
+    else if (Array.isArray(v)) v.forEach(walk);
+    else if (v && typeof v === 'object') Object.values(v).forEach(walk);
+  };
+  for (const s of scripts(html).filter(s => /type="application\/ld\+json"/.test(s.attrs))) walk(JSON.parse(s.body));
+  return [visibleText(html), ...attrs, ...ld].join(' \n ');
+}
+
 test('copy_rules_all_pages', () => {
   // Fixed spec phrases that legitimately contain "only", removed as whole phrases before the check.
   const ALLOWED = ['looked up live only when named', 'titles only'];
-  const BANNED = /not log|never log|don.t log|first|only/i;
+  const BANNED = /n[o'’]?t log|n.t logged|never log|no logging|without logging|unlogged|first|only/i;
+  const COMPLIANCE = /hipaa|gdpr|complian|certified/i;
   for (const [name, html] of Object.entries(ALL())) {
     assert.doesNotMatch(html, /href="[^"]*\/resources/i, `${name} links to /resources`);
-    let text = visibleText(html);
+    let text = allCopy(html);
     for (const phrase of ALLOWED) text = text.split(phrase).join(' ');
-    const hit = BANNED.exec(text);
-    assert.equal(hit, null, `${name}: "${hit ? text.slice(Math.max(0, hit.index - 40), hit.index + 40) : ''}"`);
+    for (const re of [BANNED, COMPLIANCE]) {
+      const hit = re.exec(text);
+      assert.equal(hit, null, `${name}: "${hit ? text.slice(Math.max(0, hit.index - 40), hit.index + 40) : ''}"`);
+    }
   }
   // The allowlist is used: the landing page carries both phrases.
   const landing = visibleText(pages.landing(CTX));
@@ -132,7 +150,8 @@ test('coverage_text_both_states_and_distinct_dates', () => {
 
 test('snapshot_unavailable_and_escaped', () => {
   const missing = visibleText(pages.landing(ctx(null, null)));
-  assert.ok(missing.includes('Graph snapshot: snapshot date unavailable'));
+  assert.ok(missing.includes('Graph snapshot date unavailable'));
+  assert.equal(missing.includes('Graph snapshot: snapshot date unavailable'), false);
   const hostile = pages.landing(ctx('<b>2026</b>', '"><script>x</script>'));
   assert.equal(hostile.includes('<b>2026</b>'), false);
   assert.ok(hostile.includes('&lt;b&gt;2026&lt;/b&gt;'));
@@ -164,6 +183,10 @@ test('example_marked_placeholder', () => {
   assert.ok(example, 'example conversation');
   assert.match(example[1], /\bdata-placeholder\b/);
   assert.ok(visibleText(example[2]).includes('explore_citation_network'));
+  // The committed file passes the shape check the server runs at startup; a bad shape throws.
+  const committed = JSON.parse(readFileSync(new URL('../assets/example.json', import.meta.url), 'utf8'));
+  assert.equal(parseExample(committed).placeholder, true);
+  assert.throws(() => parseExample({ ...committed, turns: [{ role: 'narrator', text: 'x' }] }), /assets\/example\.json: invalid shape/);
 });
 
 test('privacy_lists_recipients_and_placeholder_contact', () => {

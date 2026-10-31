@@ -31,7 +31,7 @@ export function coverageNote(snapshot: string | null, recentTier: string | null)
   if (recentTier === null) {
     return "The graph is built from the snapshot. Papers newer than the snapshot are looked up live only when named explicitly; they don't appear as neighbours.";
   }
-  return `Snapshot ${snapshot ?? 'unknown'}, updated nightly through ${recentTier} with new papers that have a Crossref DOI. Other new papers are looked up live only when named.`;
+  return `Snapshot ${snapshot ?? 'date unavailable'}, updated nightly through ${recentTier} with new papers that have a Crossref DOI. Other new papers are looked up live only when named.`;
 }
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;

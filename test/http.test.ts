@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, request, type IncomingHttpHeaders } from 'node:http';
@@ -9,7 +10,8 @@ import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/cli
 import { createMcpHandler, McpServer, type McpHttpHandler } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { loadConfig } from '../src/config.js';
-import { createApp, drain, trackInFlight } from '../src/http.js';
+import { ASSETS, createApp, drain, trackInFlight } from '../src/http.js';
+import { pages as realPages } from '../src/pages/index.js';
 import type { RateLimiter } from '../src/limits.js';
 import type { GraphMeta, PageCtx, Pages, UsageRow } from '../src/types.js';
 import { raw, serve } from './helpers.js';
@@ -186,7 +188,8 @@ test('asset_allowlist_and_traversal_404', async () => {
     const ok = await raw(port, 'GET', '/academic/mcp/assets/favicon.svg');
     assert.equal(ok.status, 200);
     assert.equal(ok.headers['content-type'], 'image/svg+xml');
-    assert.equal(ok.headers['cache-control'], 'public, max-age=31536000, immutable');
+    assert.equal(ok.headers['cache-control'], 'public, max-age=86400');
+    assert.equal(ok.headers['x-content-type-options'], 'nosniff');
     assert.equal(ok.headers['x-robots-tag'], 'noindex');
     assert.equal(ok.body, '<svg xmlns="http://www.w3.org/2000/svg"/>');
     const head = await raw(port, 'HEAD', '/academic/mcp/assets/favicon.svg');
@@ -425,4 +428,38 @@ test('drain_deadline_covers_connections_that_never_close', async () => {
   assert.ok(performance.now() - started < 1_000);
   assert.equal(server.listening, false);
   socket.destroy();
+});
+
+test('pages_send_csp_whose_hash_matches_the_copy_script', async () => {
+  // The header is checked against the script as rendered, so editing the script can't silently
+  // leave Copy blocked by a stale hash.
+  const html = realPages.landing({ publicBaseUrl: config.publicBaseUrl, snapshot: null, recentTier: null });
+  const inline = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]);
+  assert.equal(inline.length, 1);
+  const hash = createHash('sha256').update(inline[0], 'utf8').digest('base64');
+  await withApp({}, async ({ port }) => {
+    for (const path of ['/academic/mcp', '/academic/mcp/privacy', '/academic/mcp/terms', '/academic/mcp/nope']) {
+      const r = await raw(port, 'GET', path);
+      const csp = String(r.headers['content-security-policy']);
+      assert.equal(csp, `default-src 'none'; img-src 'self'; font-src 'self'; style-src 'unsafe-inline'; script-src 'sha256-${hash}'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`, path);
+      assert.equal(r.headers['x-content-type-options'], 'nosniff', path);
+      assert.equal(r.headers['referrer-policy'], 'strict-origin-when-cross-origin', path);
+    }
+  });
+});
+
+test('page_assets_are_allowlisted_and_present', () => {
+  const dir = new URL('../assets/', import.meta.url);
+  const onDisk = new Set(readdirSync(dir));
+  // Every allowlisted file exists, and every file but the example (read, not served) is allowlisted.
+  for (const [name, asset] of Object.entries(ASSETS)) assert.ok(existsSync(new URL(asset.file, dir)), name);
+  assert.deepEqual([...onDisk].filter(f => !Object.values(ASSETS).some(a => a.file === f)), ['example.json']);
+  // Every asset the pages reference is allowlisted.
+  const ctx = { publicBaseUrl: config.publicBaseUrl, snapshot: null, recentTier: null };
+  const referenced = new Set<string>();
+  for (const page of Object.values(realPages)) {
+    for (const m of page(ctx).matchAll(/\/academic\/mcp\/assets\/([^"')?\s]+)/g)) referenced.add(m[1]);
+  }
+  assert.deepEqual([...referenced].sort(), ['dm-sans-latin-ext-wght-normal.woff2', 'dm-sans-latin-wght-normal.woff2', 'favicon.svg', 'icon.png', 'og.png']);
+  for (const name of referenced) assert.ok(Object.hasOwn(ASSETS, name), name);
 });

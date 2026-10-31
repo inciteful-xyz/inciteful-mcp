@@ -14,21 +14,41 @@ const BADGES = ['Free', 'No account', 'OpenAlex metadata (CC0)', 'Open-source se
 /** When the client steps below were last checked against each vendor's docs. */
 const STEPS_CHECKED = '2026-10-30';
 
-type Example = { placeholder: boolean; label: string; turns: Array<{ role: 'user' | 'tool' | 'assistant'; text: string }> };
+type Role = 'user' | 'tool' | 'assistant';
+export type Example = { placeholder: boolean; label: string; turns: Array<{ role: Role; text: string }> };
+const ROLES: ReadonlySet<unknown> = new Set<Role>(['user', 'tool', 'assistant']);
+
+/**
+ * Checks the example's shape. The launch checklist hand-edits the file, so a bad shape fails the
+ * pod at startup rather than turning every landing request into a 500.
+ */
+export function parseExample(raw: unknown): Example {
+  const e = raw as Partial<Example> | null;
+  const ok = typeof e === 'object' && e !== null
+    && typeof e.placeholder === 'boolean'
+    && typeof e.label === 'string'
+    && Array.isArray(e.turns) && e.turns.length > 0
+    && e.turns.every(t => typeof t === 'object' && t !== null && ROLES.has(t.role) && typeof t.text === 'string');
+  if (!ok) throw new Error('assets/example.json: invalid shape');
+  return e as Example;
+}
+
 /** A placeholder until the launch checklist swaps in a real run (spec §4.8). */
-const EXAMPLE = JSON.parse(readFileSync(new URL('../../assets/example.json', import.meta.url), 'utf8')) as Example;
+const EXAMPLE = parseExample(JSON.parse(readFileSync(new URL('../../assets/example.json', import.meta.url), 'utf8')));
 
 type Client = { id: string; name: string; steps: (l: Links) => string; source: { url: string; label: string } };
 
 const b = (s: string) => `<b>${s}</b>`;
 const pre = (s: string) => `<pre><code>${esc(s)}</code></pre>`;
+/** Escaped, with line-break opportunities after single slashes, so the URL wraps at path segments. */
+const breakable = (url: string) => esc(url).replace(/(?<=[^/])\/(?=[^/])/g, '/<wbr>');
 
 const CLIENTS: Client[] = [
   {
     id: 'claude', name: 'Claude',
     steps: l => `<ol>
 <li>In Claude, open ${b('Customize → Connectors')}, click ${b('+ Add')}, then ${b('Add custom connector')}.</li>
-<li>Name it “Inciteful”, paste <code>${esc(l.mcp)}</code> as the server URL, and continue.</li>
+<li>Name it “Inciteful”, paste <code>${breakable(l.mcp)}</code> as the server URL, and continue.</li>
 <li>Under ${b('Authentication')}, choose ${b('No sign in')}, then click ${b('Add')}.</li>
 <li>In a chat, click ${b('+')}, open ${b('Connectors')} and turn Inciteful on.</li>
 <li>Ask: <i>“Using Inciteful, find papers similar to 10.1038/nature14539.”</i></li>
@@ -40,7 +60,7 @@ const CLIENTS: Client[] = [
     id: 'chatgpt', name: 'ChatGPT',
     steps: l => `<ol>
 <li>Open ChatGPT’s Plugins page (chatgpt.com/plugins), select the ${b('+')} button, then ${b('Add custom MCP server')}.</li>
-<li>Enter the name “Inciteful” and a short description. Under ${b('Connection')}, choose a public endpoint and paste <code>${esc(l.mcp)}</code>.</li>
+<li>Enter the name “Inciteful” and a short description. Under ${b('Connection')}, choose a public endpoint and paste <code>${breakable(l.mcp)}</code>.</li>
 <li>For authentication, pick the option without sign-in: Inciteful needs no account. Review the warning, select ${b('I understand and want to continue')}, then ${b('Create as a plugin')}.</li>
 <li>In a new chat, type ${b('@')}, pick Inciteful and ask your question.</li>
 </ol>
@@ -69,7 +89,7 @@ const CLIENTS: Client[] = [
     id: 'vscode', name: 'VS Code',
     steps: l => `<ol>
 <li>Open the Command Palette and run ${b('MCP: Add Server')}, then choose ${b('HTTP (HTTP or Server-Sent Events)')}.</li>
-<li>Paste <code>${esc(l.mcp)}</code>, enter the ID <code>inciteful</code>, and choose where to save it (${b('Global')} makes it available in every workspace).</li>
+<li>Paste <code>${breakable(l.mcp)}</code>, enter the ID <code>inciteful</code>, and choose where to save it (${b('Global')} makes it available in every workspace).</li>
 <li>Or add it to <code>.vscode/mcp.json</code> yourself:${pre(JSON.stringify({ servers: { inciteful: { type: 'http', url: l.mcp } } }, null, 2))}</li>
 <li>Ask your question in the Chat view.</li>
 </ol>`,
@@ -78,7 +98,7 @@ const CLIENTS: Client[] = [
   {
     id: 'other', name: 'Other clients',
     steps: l => `<ol>
-<li>Add a remote MCP server with the URL <code>${esc(l.mcp)}</code>. The transport is Streamable HTTP.</li>
+<li>Add a remote MCP server with the URL <code>${breakable(l.mcp)}</code>. The transport is Streamable HTTP.</li>
 <li>Leave authentication empty: no API key, header or sign-in.</li>
 <li>Clients configured with JSON often take <code>{"mcpServers": {"inciteful": {"url": "…"}}}</code>, but key names vary, so check your client’s docs.</li>
 </ol>`,
@@ -90,7 +110,7 @@ function clientPanels(l: Links): string {
   const inputs = CLIENTS.map((c, i) =>
     `<input type="radio" name="client" id="c-${c.id}"${i === 0 ? ' checked' : ''}><label for="c-${c.id}">${c.name}</label>`).join('\n');
   const panels = CLIENTS.map(c => `<section class="panel" id="p-${c.id}" aria-labelledby="h-${c.id}">
-<h3 id="h-${c.id}">${c.name}</h3>
+<h2 id="h-${c.id}">${c.name}</h2>
 ${c.steps(l)}
 <p class="checked">Steps checked on ${STEPS_CHECKED} against <a href="${esc(c.source.url)}">${c.source.label}</a>.</p>
 </section>`).join('\n');
@@ -130,8 +150,7 @@ ${turns}
 const SAMPLE_PROVENANCE = `"provenance": {
   "retrieved_at": "2026-10-30T18:02:11Z",
   "tool": "explore_citation_network",
-  "data_source": "OpenAlex metadata (CC0)
-                  via Inciteful's citation graph",
+  "data_source": "OpenAlex metadata (CC0) via Inciteful's citation graph",
   "graph_snapshot": "2026-10-15",
   "seeds": [
     { "input": "10.1038/nature14539",
@@ -184,19 +203,16 @@ function jsonLd(l: Links): string {
 }
 
 /** Progressive enhancement: the URL is selectable text; the button appears only when it can work. */
-const COPY_SCRIPT = `(function(){var b=document.getElementById('copy'),u=document.getElementById('mcp-url');if(!b||!u||!navigator.clipboard)return;b.hidden=false;b.addEventListener('click',function(){navigator.clipboard.writeText(u.textContent.trim()).then(function(){b.textContent='Copied';setTimeout(function(){b.textContent='Copy'},1600)},function(){})})})();`;
-
-/** Escaped, with line-break opportunities after single slashes, so the URL wraps at path segments. */
-const breakable = (url: string) => esc(url).replace(/(?<=[^/])\/(?=[^/])/g, '/<wbr>');
+export const COPY_SCRIPT = `(function(){var b=document.getElementById('copy'),u=document.getElementById('mcp-url');if(!b||!u||!navigator.clipboard)return;b.hidden=false;b.addEventListener('click',function(){navigator.clipboard.writeText(u.textContent.trim()).then(function(){b.textContent='Copied';setTimeout(function(){b.textContent='Copy'},1600)},function(){})})})();`;
 
 export function landing(ctx: PageCtx): string {
   const l = links(ctx);
-  const snapshot = ctx.snapshot ?? 'snapshot date unavailable';
+  const snapshot = ctx.snapshot === null ? '<b>Graph snapshot date unavailable</b>.' : `<b>Graph snapshot: ${esc(ctx.snapshot)}</b>.`;
   const body = `<section class="hero"><div class="wrap">
 <h1>${H1}</h1>
 <p class="sub">Connect Claude, ChatGPT, Cursor or any MCP client to Inciteful. It snowballs from seed papers, finds the important and review papers around them, and traces the paths between two papers. It’s free, needs no login, and runs on open OpenAlex data.</p>
-<p class="url-label" id="url-label">Add this URL to your assistant as a remote MCP server:</p>
-<div class="url"><code id="mcp-url" aria-labelledby="url-label">${breakable(l.mcp)}</code><button type="button" id="copy" hidden>Copy</button></div>
+<p class="url-label">Add this URL to your assistant as a remote MCP server:</p>
+<div class="url"><code id="mcp-url">${breakable(l.mcp)}</code><button type="button" id="copy" hidden>Copy</button></div>
 ${clientPanels(l)}
 <ul class="badges" aria-label="At a glance">${BADGES.map(x => `<li>${x}</li>`).join('')}</ul>
 </div></section>
@@ -226,11 +242,11 @@ ${example()}
 <li><b>Fast similarity:</b> <a href="${esc(l.methods('fast-similarity'))}">one step out</a> from the seeds, for quick answers.</li>
 <li><b>Connector:</b> <a href="${esc(l.methods('connector'))}">shortest undirected citation paths</a> between two papers.</li>
 </ul>
-<p class="muted">Every result names the method that ranked it and carries a provenance block. The fields are explained on the <a href="${esc(l.methods('provenance-fields'))}">methods page</a>.</p>
+<p class="muted">Every citation-graph result names the method that ranked it and carries a provenance block. The fields are explained on the <a href="${esc(l.methods('provenance-fields'))}">methods page</a>.</p>
 </div>
 <div>
 <pre>${esc(SAMPLE_PROVENANCE)}</pre>
-<p class="muted">Paste it into the methods appendix of a PRISMA-S or TARCiS report.</p>
+<p class="muted">Abridged; real results carry every field. Paste it into the methods appendix of a PRISMA-S or TARCiS report.</p>
 </div>
 </div>
 </div></section>
@@ -238,7 +254,7 @@ ${example()}
 <section class="sec alt"><div class="wrap">
 <h2>Data, coverage and limits</h2>
 <ul class="plain">
-<li><b>Graph snapshot: ${esc(snapshot)}</b>. ${esc(coverageNote(ctx.snapshot, ctx.recentTier))}</li>
+<li>${snapshot} ${esc(coverageNote(ctx.snapshot, ctx.recentTier))}</li>
 <li><b>Title filters match paper titles only</b> (not abstracts or full text), with Porter stemming. The tools say so, so your assistant won’t over-filter.</li>
 <li>Very highly cited papers aren’t expanded, which keeps graphs a usable size. When that happens, the result says how many.</li>
 <li><b>Licences:</b> metadata is OpenAlex CC0; full text from PubMed Central carries each article’s own licence, which the result names.</li>
@@ -252,8 +268,8 @@ ${example()}
 <ul class="plain">
 <li>No account, no sign-in and no cookies.</li>
 <li>Our usage log keeps, for 90 days, one row per tool call: the tool name, your client’s name and version, how long it took, the outcome and the graph size. Your IP address is stored as a hash with a salt that changes every day. The usage log holds no queries, paper IDs or raw IP addresses.</li>
-<li>Our graph service’s logs may contain the paper IDs and queries it processes. They’re kept for up to 15 days, with no IP addresses.</li>
-<li>Data goes to Cloudflare (network), OpenAlex (search terms and IDs), NCBI (full text) and your assistant’s vendor, under its own policy.</li>
+<li>Our graph service’s own logs may contain the paper IDs and queries it processes. We keep them for up to 15 days, with no IP addresses.</li>
+<li>Data goes to Cloudflare (network), OpenAlex (search terms and IDs), NCBI (full text), Sentry (our graph service’s error and performance monitoring: request addresses that may include paper IDs, no IP addresses, kept up to 90 days) and your assistant’s vendor, under its own policy.</li>
 <li>Don’t put personal or health details in your prompts.</li>
 </ul>
 <p class="muted"><a href="${esc(l.privacy)}">Full privacy policy</a> · <a href="${esc(l.terms)}">Terms</a></p>
@@ -261,7 +277,7 @@ ${example()}
 
 <section class="sec alt"><div class="wrap">
 <h2>Works well with</h2>
-<p>Zotero, EndNote and other reference managers, through the BibTeX and RIS export; and the <a href="${esc(l.webApp)}">Inciteful web app</a>, where every result links to an interactive graph you can keep exploring.</p>
+<p>Zotero, EndNote and other reference managers, through the BibTeX and RIS export; and the <a href="${esc(l.webApp)}">Inciteful web app</a>, where results link to an interactive graph you can keep exploring.</p>
 </div></section>
 
 <section class="sec"><div class="wrap">
