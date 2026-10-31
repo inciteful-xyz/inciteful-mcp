@@ -1,0 +1,26 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "com.incitefulmed/academic",
+  "title": "Inciteful",
+  "description": "Citation graph search over OpenAlex: similar papers, citation networks, paths and BibTeX export.",
+  "version": "0.1.0",
+  "websiteUrl": "https://incitefulmed.com/academic/mcp",
+  "repository": {
+    "url": "https://github.com/inciteful-xyz/inciteful-mcp",
+    "source": "github",
+    "id": "1373530266"
+  },
+  "icons": [
+    {
+      "src": "https://incitefulmed.com/academic/mcp/assets/icon.png",
+      "mimeType": "image/png",
+      "sizes": ["512x512"]
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://incitefulmed.com/academic/mcp"
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "Inciteful MCP"
+type: software
+authors:
+  - name: "Inciteful MCP contributors"
+abstract: "An MCP server that connects AI assistants to Inciteful's citation graph over OpenAlex metadata: similar papers, citation networks, citation paths between papers, and BibTeX and RIS export."
+repository-code: "https://github.com/inciteful-xyz/inciteful-mcp"
+url: "https://incitefulmed.com/academic/mcp"
+license: MIT
+version: 0.1.0
+keywords:
+  - citation analysis
+  - literature review
+  - OpenAlex
+  - Model Context Protocol

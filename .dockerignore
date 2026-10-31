@@ -1,0 +1,8 @@
+# Allowlist: the build needs only these. Nothing else (node_modules, dist, .env, .git, tests)
+# reaches the build context.
+*
+!package.json
+!package-lock.json
+!tsconfig.json
+!src/
+!assets/
