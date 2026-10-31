@@ -4,6 +4,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { readFile } from 'node:fs/promises';
 import type { IncomingMessage, OutgoingHttpHeaders, Server, ServerResponse } from 'node:http';
+import { Server as NetServer } from 'node:net';
 import { join } from 'node:path';
 import { toNodeHandler } from '@modelcontextprotocol/node';
 import type { McpHttpHandler } from '@modelcontextprotocol/server';
@@ -244,50 +245,59 @@ const DRAIN_SWEEP_MS = 250;
 export type Tracked = {
   listener: (req: IncomingMessage, res: ServerResponse) => void;
   inFlight: () => number;
+  /** True while a response has ended but its bytes may still sit in Node's write buffer. */
+  flushing: () => boolean;
   /** Resolves when no request is in flight. */
   idle: () => Promise<void>;
 };
 
-/** Counts requests from arrival until their response closes (finished or aborted). */
+/** Tracks requests from arrival until their response closes (flushed or aborted). */
 export function trackInFlight(listener: (req: IncomingMessage, res: ServerResponse) => void): Tracked {
-  let count = 0;
+  const open = new Set<ServerResponse>();
   let waiters: Array<() => void> = [];
-  const settle = () => {
-    count -= 1;
-    if (count === 0) {
-      const ready = waiters;
-      waiters = [];
-      for (const w of ready) w();
-    }
-  };
   return {
     listener: (req, res) => {
-      count += 1;
-      res.once('close', settle);
+      open.add(res);
+      res.once('close', () => {
+        open.delete(res);
+        if (open.size === 0) {
+          const ready = waiters;
+          waiters = [];
+          for (const w of ready) w();
+        }
+      });
       listener(req, res);
     },
-    inFlight: () => count,
-    idle: () => (count === 0 ? Promise.resolve() : new Promise<void>(resolve => waiters.push(resolve))),
+    inFlight: () => open.size,
+    // 'close' follows 'finish', which fires once the socket has handed every byte to the kernel.
+    flushing: () => [...open].some(res => res.writableEnded),
+    idle: () => (open.size === 0 ? Promise.resolve() : new Promise<void>(resolve => waiters.push(resolve))),
   };
 }
 
 /**
  * Stops accepting connections and waits up to `timeoutMs` for in-flight requests to finish. Idle
- * keep-alive connections are closed as they free up; at the timeout every connection is closed.
+ * keep-alive connections are closed once their response has flushed; at the timeout every
+ * connection is closed.
  * Resolves true when everything finished in time.
  */
 export async function drain(server: Server, tracked: Tracked, timeoutMs: number): Promise<boolean> {
-  const closed = new Promise<void>(resolve => server.close(() => resolve()));
-  server.closeIdleConnections();
+  // closeIdleConnections() destroys every connection whose response has ended, even one whose
+  // bytes are still in Node's write buffer, and destroy() drops them: the client never gets the
+  // end of its response. So skip a sweep while any response is flushing. http.Server#close() runs
+  // an unguarded sweep, so stop listening with net.Server#close() instead.
+  const closed = new Promise<void>(resolve => NetServer.prototype.close.call(server, () => resolve()));
+  const sweep = () => { if (!tracked.flushing()) server.closeIdleConnections(); };
+  sweep();
   // A keep-alive connection becomes idle when its response ends; close those as they appear.
-  const sweeper = setInterval(() => server.closeIdleConnections(), DRAIN_SWEEP_MS);
+  const sweeper = setInterval(sweep, DRAIN_SWEEP_MS);
   // One deadline for the whole drain: waiting for requests, then for connections to close.
   let timer: NodeJS.Timeout | undefined;
   const timedOut = new Promise<'timeout'>(resolve => { timer = setTimeout(() => resolve('timeout'), timeoutMs); });
   try {
     let outcome = await Promise.race([tracked.idle().then(() => 'idle' as const), timedOut]);
     if (outcome === 'idle') {
-      server.closeIdleConnections();
+      sweep();
       outcome = await Promise.race([closed.then(() => 'idle' as const), timedOut]);
     }
     if (outcome === 'timeout') {

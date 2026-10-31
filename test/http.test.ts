@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createServer, request, type IncomingHttpHeaders } from 'node:http';
+import { Agent, createServer, request, type IncomingHttpHeaders } from 'node:http';
 import { connect, type AddressInfo } from 'node:net';
 import { test } from 'node:test';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
@@ -428,6 +428,98 @@ test('drain_deadline_covers_connections_that_never_close', async () => {
   assert.ok(performance.now() - started < 1_000);
   assert.equal(server.listening, false);
   socket.destroy();
+});
+
+// A response can end while its bytes still sit in Node's write buffer: toNodeHandler calls
+// res.end() as soon as write() returns true, which it does for any chunk under the socket's
+// high-water mark (64 KiB), whether or not the kernel took it. In staging that was a 10-50 KB
+// SSE result on a connection to Traefik. Here the high-water mark is raised and the client reads
+// nothing for a while, so megabytes stay buffered and the window is wide enough to hit every time.
+const FLUSHING_BODY_BYTES = 16 * 1024 * 1024;
+
+async function flushingResponse() {
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let entered!: () => void;
+  const reached = new Promise<void>(resolve => { entered = resolve; });
+  const mcp = {
+    async fetch() {
+      entered();
+      await gate;
+      return new Response('x'.repeat(FLUSHING_BODY_BYTES), { headers: { 'content-type': 'text/event-stream' } });
+    },
+    async close() {},
+  } as unknown as McpHttpHandler;
+  const { app } = fakes({ mcp });
+  const tracked = trackInFlight(app);
+  // Resolves with the bytes still in Node's write buffer just after the response ends.
+  let ended!: (buffered: number) => void;
+  const endedWith = new Promise<number>(resolve => { ended = resolve; });
+  const server = createServer({ highWaterMark: 4 * FLUSHING_BODY_BYTES }, (req, res) => {
+    const end = res.end.bind(res) as (...args: unknown[]) => typeof res;
+    res.end = ((...args: unknown[]) => { const out = end(...args); ended(res.socket?.writableLength ?? 0); return out; }) as typeof res.end;
+    tracked.listener(req, res);
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as AddressInfo).port;
+  // A keep-alive client, as Traefik is: the connection becomes idle once the response ends.
+  const agent = new Agent({ keepAlive: true });
+  let resume!: () => void;
+  const received = new Promise<{ bytes: number; complete: boolean }>(resolve => {
+    const req = request({ host: '127.0.0.1', port, method: 'POST', path: '/academic/mcp', headers: POST_HEADERS, agent }, res => {
+      res.pause();
+      resume = () => res.resume();
+      let bytes = 0;
+      res.on('data', (c: Buffer) => { bytes += c.length; });
+      res.on('end', () => resolve({ bytes, complete: true }));
+      res.on('error', () => resolve({ bytes, complete: false }));
+    });
+    req.on('error', () => resolve({ bytes: 0, complete: false }));
+    req.end(POST_BODY);
+  });
+  await reached;
+  return { server, tracked, release, endedWith, received, resume: () => resume(), close: () => agent.destroy() };
+}
+
+/** Longer than two drain sweeps (250 ms apart). */
+const PAST_TWO_SWEEPS_MS = 600;
+
+test('drain_keeps_a_connection_open_until_its_ended_response_has_flushed', async () => {
+  const r = await flushingResponse();
+  try {
+    const draining = drain(r.server, r.tracked, 10_000);
+    r.release();
+    // Precondition: the response has ended with bytes still buffered in Node.
+    assert.ok(await r.endedWith > 0);
+    await new Promise(resolve => setTimeout(resolve, PAST_TWO_SWEEPS_MS));
+    r.resume();
+    assert.deepEqual(await r.received, { bytes: FLUSHING_BODY_BYTES, complete: true });
+    // Then the idle keep-alive connection is closed by a sweep, not left to Node's 5 s keep-alive timeout.
+    const flushedAt = performance.now();
+    assert.equal(await draining, true);
+    assert.ok(performance.now() - flushedAt < 1_000);
+  } finally {
+    r.close();
+  }
+});
+
+test('drain_started_while_a_response_is_flushing_lets_it_finish', async () => {
+  const r = await flushingResponse();
+  try {
+    r.release();
+    assert.ok(await r.endedWith > 0);
+    // SIGTERM lands now: the response has ended but most of it is still in Node's buffer.
+    const draining = drain(r.server, r.tracked, 10_000);
+    await new Promise(resolve => setTimeout(resolve, PAST_TWO_SWEEPS_MS));
+    r.resume();
+    assert.deepEqual(await r.received, { bytes: FLUSHING_BODY_BYTES, complete: true });
+    // Then the idle keep-alive connection is closed by a sweep, not left to Node's 5 s keep-alive timeout.
+    const flushedAt = performance.now();
+    assert.equal(await draining, true);
+    assert.ok(performance.now() - flushedAt < 1_000);
+  } finally {
+    r.close();
+  }
 });
 
 test('pages_send_csp_whose_hash_matches_the_copy_script', async () => {
