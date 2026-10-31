@@ -89,5 +89,7 @@ export const VENDOR_RANGES: readonly string[] = [...ANTHROPIC_RANGES, ...OPENAI_
 
 /** Usage rows older than this are purged. */
 export const USAGE_RETENTION_DAYS = 90;
+/** Characters kept of the client-supplied `clientInfo` name and version. */
+export const USAGE_CLIENT_MAX_CHARS = 100;
 /** Random bytes in the daily `ip_hash` salt. */
 export const USAGE_SALT_BYTES = 32;

@@ -80,6 +80,8 @@ test('nulls_stored_as_null', () => {
   log.record(row({
     tool: 'explore_citation_network', outcome: 'timeout', durationMs: 90_000.6, graphPapers: 0, graphDepth: 2, openalexCalls: 0,
   }));
+  // Client-supplied strings are cut to 100 characters.
+  log.record(row({ clientName: 'n'.repeat(10_000), clientVersion: 'v'.repeat(10_000) }));
   log.close();
 
   assert.deepEqual(readRows(path), [
@@ -91,6 +93,10 @@ test('nulls_stored_as_null', () => {
       // A real 0 stays 0; only absent values are NULL. Durations are whole milliseconds.
       ts: '2026-10-30T18:02:11.123Z', tool: 'explore_citation_network', client_name: 'claude-ai', client_version: '1.0.0',
       ip_hash: HASH_SALT_1, duration_ms: 90_001, outcome: 'timeout', graph_papers: 0, graph_depth: 2, openalex_calls: 0, count: null,
+    },
+    {
+      ts: '2026-10-30T18:02:11.123Z', tool: 'search_literature', client_name: 'n'.repeat(100), client_version: 'v'.repeat(100),
+      ip_hash: HASH_SALT_1, duration_ms: 120, outcome: 'ok', graph_papers: null, graph_depth: null, openalex_calls: null, count: null,
     },
   ]);
 });
@@ -141,13 +147,13 @@ test('rejections_aggregated_per_minute', () => {
   at('2026-10-30T12:01:00.000Z', IP);
   // Nothing reaches the DB before a flush.
   assert.deepEqual(readRows(path), []);
+  // At 12:01:00 the 12:00 minute has ended and is written; 12:01 is still open and stays in memory.
   log.flush();
 
   const pick = (r: Record<string, unknown>) => [r.ts, r.ip_hash === HASH_SALT_1 ? 'IP' : 'OTHER', r.count];
   assert.deepEqual(readRows(path).map(pick), [
     ['2026-10-30T12:00:00.000Z', 'IP', 3],
     ['2026-10-30T12:00:00.000Z', 'OTHER', 1],
-    ['2026-10-30T12:01:00.000Z', 'IP', 1],
   ]);
   const [first] = readRows(path);
   assert.deepEqual(first, {
@@ -155,17 +161,24 @@ test('rejections_aggregated_per_minute', () => {
     duration_ms: null, outcome: 'rate_limited', graph_papers: null, graph_depth: null, openalex_calls: null, count: 3,
   });
 
-  // A flush mid-minute does not split the minute: later rejections add to the same row.
+  // A flush mid-minute writes nothing for the current minute.
   at('2026-10-30T12:01:30.000Z', IP);
   log.flush();
-  log.flush(); // nothing pending: no change
-  // close() flushes what is pending.
-  at('2026-10-30T12:01:45.000Z', IP);
+  assert.equal(readRows(path).length, 2);
+  // The first flush after the minute ends writes it once.
+  clock.t = new Date('2026-10-30T12:02:00.000Z');
+  log.flush();
+  log.flush();
+  assert.deepEqual(readRows(path).map(pick).slice(2), [['2026-10-30T12:01:00.000Z', 'IP', 2]]);
+
+  // close() writes every pending minute, the current one included.
+  at('2026-10-30T12:02:10.000Z', IP);
   log.close();
   assert.deepEqual(readRows(path).map(pick), [
     ['2026-10-30T12:00:00.000Z', 'IP', 3],
     ['2026-10-30T12:00:00.000Z', 'OTHER', 1],
-    ['2026-10-30T12:01:00.000Z', 'IP', 3],
+    ['2026-10-30T12:01:00.000Z', 'IP', 2],
+    ['2026-10-30T12:02:00.000Z', 'IP', 1],
   ]);
 });
 
@@ -199,18 +212,29 @@ test('purge_deletes_over_90_days', () => {
 });
 
 test('timers_are_unrefd', (t) => {
-  const timers: Array<{ ms: number | undefined; timer: NodeJS.Timeout }> = [];
+  const timers = new Map<number | undefined, { fn: () => void; timer: NodeJS.Timeout }>();
   const real = globalThis.setInterval;
   const spy = t.mock.method(globalThis, 'setInterval', ((fn: () => void, ms?: number) => {
     const timer = real(fn, ms);
-    timers.push({ ms, timer });
+    timers.set(ms, { fn, timer });
     return timer;
   }) as typeof setInterval);
-  const log = new UsageLog(dbPath(), { now: clockAt('2026-10-30T18:02:11.000Z').now });
+  const path = dbPath();
+  const clock = clockAt('2026-07-01T12:00:05.000Z');
+  const log = new UsageLog(path, { now: clock.now });
   spy.mock.restore();
   try {
-    assert.deepEqual(timers.map((x) => x.ms).sort((a, b) => Number(a) - Number(b)), [60_000, 86_400_000]);
-    assert.ok(timers.every((x) => !x.timer.hasRef()));
+    assert.deepEqual([...timers.keys()].sort((a, b) => Number(a) - Number(b)), [60_000, 86_400_000]);
+    assert.ok([...timers.values()].every((x) => !x.timer.hasRef()));
+
+    // The 60 s callback flushes and does not purge; the 24 h callback purges.
+    log.record(row());
+    log.recordRejection(IP);
+    clock.t = new Date('2026-12-01T00:00:00.000Z');
+    timers.get(60_000)!.fn();
+    assert.deepEqual(readRows(path).map((r) => r.outcome), ['ok', 'rate_limited']);
+    timers.get(86_400_000)!.fn();
+    assert.equal(readRows(path).length, 0);
   } finally { log.close(); }
 });
 
@@ -222,13 +246,17 @@ test('flush_runs_every_minute_and_purge_daily', (t) => {
   try {
     log.record(row());
     log.recordRejection(IP);
+    clock.t = new Date('2026-07-01T12:01:05.000Z');
     t.mock.timers.tick(59_999);
     assert.equal(readRows(path).length, 1);
     t.mock.timers.tick(1);
     assert.deepEqual(readRows(path).map((r) => r.outcome), ['ok', 'rate_limited']);
 
+    // Far past retention, the next 60 s tick still leaves the old rows: purge is not on the minute timer.
     clock.t = new Date('2026-12-01T00:00:00.000Z');
-    t.mock.timers.tick(86_400_000 - 60_000);
+    t.mock.timers.tick(60_000);
+    assert.equal(readRows(path).length, 2);
+    t.mock.timers.tick(86_400_000 - 120_000);
     assert.equal(readRows(path).length, 0);
   } finally { log.close(); }
 });
@@ -262,6 +290,7 @@ test('db_failure_does_not_throw', (t) => {
   log.record(row());
   log.record(row());
   log.recordRejection(IP);
+  clock.t = new Date('2026-10-30T18:03:00.000Z'); // the rejection's minute has ended
   log.flush();
   assert.equal(log.purge(), 0);
   log.close();

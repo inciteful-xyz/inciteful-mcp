@@ -40,7 +40,12 @@ export type UsageRow = {
 };
 
 export interface UsageSink {
+  /** One row per `tools/call`. */
   record(row: UsageRow): void;
+  /** One per 429; aggregated per (minute, caller). */
+  recordRejection(callerKey: string): void;
+  /** Writes pending rejections and closes the store (SIGTERM). */
+  close(): void;
 }
 
 export type PageCtx = { publicBaseUrl: URL } & GraphMeta;

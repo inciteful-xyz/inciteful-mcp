@@ -5,12 +5,13 @@
 
 import { createHash, randomBytes as cryptoRandomBytes } from 'node:crypto';
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
-import { TOOL_NAMES, USAGE_RETENTION_DAYS, USAGE_SALT_BYTES } from './limits.js';
+import { TOOL_NAMES, USAGE_CLIENT_MAX_CHARS, USAGE_RETENTION_DAYS, USAGE_SALT_BYTES } from './limits.js';
 import type { UsageRow, UsageSink } from './types.js';
 
 const FLUSH_INTERVAL_MS = 60_000;
 const PURGE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
+const MINUTE_MS = 60_000;
 
 const KNOWN_TOOLS: ReadonlySet<string> = new Set(TOOL_NAMES);
 
@@ -20,9 +21,6 @@ const SCHEMA = `
     outcome TEXT, graph_papers INTEGER, graph_depth INTEGER, openalex_calls INTEGER, count INTEGER
   );
   CREATE INDEX IF NOT EXISTS usage_ts ON usage (ts);
-  -- One rejection row per (minute, ip_hash), however many flushes the minute spans.
-  CREATE UNIQUE INDEX IF NOT EXISTS usage_rejection_minute ON usage (ts, ip_hash)
-    WHERE outcome = 'rate_limited' AND duration_ms IS NULL;
 `;
 
 type Op = 'open' | 'write' | 'flush' | 'purge' | 'close';
@@ -36,17 +34,25 @@ function errorKind(err: unknown): string {
   return 'Error';
 }
 
+/** Client-supplied strings are cut to a fixed length, without leaving half a surrogate pair. */
+function clip(s: string | null): string | null {
+  if (s === null || s.length <= USAGE_CLIENT_MAX_CHARS) return s;
+  return s.slice(0, USAGE_CLIENT_MAX_CHARS).replace(/[\uD800-\uDBFF]$/, '');
+}
+
+const minuteOf = (d: Date) => new Date(Math.floor(d.getTime() / MINUTE_MS) * MINUTE_MS).toISOString();
+
 export class UsageLog implements UsageSink {
   private readonly now: () => Date;
   private readonly randomBytes: (n: number) => Buffer;
   private db: DatabaseSync | null = null;
   private insert: StatementSync | null = null;
-  private upsertRejection: StatementSync | null = null;
+  private insertRejection: StatementSync | null = null;
   private deleteOld: StatementSync | null = null;
   private salt: Buffer | null = null;
   private saltDay = '';
-  /** Rejection counts by `${minuteIso}\n${ipHash}`, written by flush(). */
-  private rejections = new Map<string, number>();
+  /** Rejection counts by minute start (ISO), then ip_hash. flush() writes minutes that have ended. */
+  private rejections = new Map<string, Map<string, number>>();
   private readonly timers: NodeJS.Timeout[] = [];
   private readonly warned = new Set<string>();
 
@@ -57,16 +63,13 @@ export class UsageLog implements UsageSink {
       const db = new DatabaseSync(path);
       try {
         db.exec('PRAGMA journal_mode = WAL');
+        db.exec('PRAGMA synchronous = NORMAL');
         db.exec(SCHEMA);
         this.insert = db.prepare(
           `INSERT INTO usage (ts, tool, client_name, client_version, ip_hash, duration_ms, outcome, graph_papers, graph_depth, openalex_calls, count)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         );
-        this.upsertRejection = db.prepare(
-          `INSERT INTO usage (ts, ip_hash, outcome, count) VALUES (?, ?, 'rate_limited', ?)
-           ON CONFLICT (ts, ip_hash) WHERE outcome = 'rate_limited' AND duration_ms IS NULL
-           DO UPDATE SET count = usage.count + excluded.count`,
-        );
+        this.insertRejection = db.prepare(`INSERT INTO usage (ts, ip_hash, outcome, count) VALUES (?, ?, 'rate_limited', ?)`);
         this.deleteOld = db.prepare('DELETE FROM usage WHERE ts < ?');
       } catch (err) {
         db.close();
@@ -87,12 +90,13 @@ export class UsageLog implements UsageSink {
   record(row: UsageRow): void {
     if (!this.insert) return;
     try {
+      const now = this.now();
       this.insert.run(
-        this.now().toISOString(),
+        now.toISOString(),
         row.tool !== null && KNOWN_TOOLS.has(row.tool) ? row.tool : null,
-        row.clientName ?? null,
-        row.clientVersion ?? null,
-        this.ipHash(row.callerKey),
+        clip(row.clientName ?? null),
+        clip(row.clientVersion ?? null),
+        this.ipHash(row.callerKey, now),
         Math.round(row.durationMs),
         row.outcome,
         row.graphPapers ?? null,
@@ -105,38 +109,24 @@ export class UsageLog implements UsageSink {
     }
   }
 
-  /** Counts a 429 in memory; flush() writes one `rate_limited` row per (minute, caller). */
+  /** Counts a 429 in memory; one `rate_limited` row per (minute, caller) is written once the minute ends. */
   recordRejection(callerKey: string): void {
     if (!this.db) return;
     try {
-      const minute = new Date(Math.floor(this.now().getTime() / 60_000) * 60_000).toISOString();
-      const key = `${minute}\n${this.ipHash(callerKey)}`;
-      this.rejections.set(key, (this.rejections.get(key) ?? 0) + 1);
+      const now = this.now();
+      const minute = minuteOf(now);
+      const ipHash = this.ipHash(callerKey, now);
+      let counts = this.rejections.get(minute);
+      if (!counts) this.rejections.set(minute, (counts = new Map()));
+      counts.set(ipHash, (counts.get(ipHash) ?? 0) + 1);
     } catch (err) {
       this.warn('write', err);
     }
   }
 
+  /** Writes the rejection counts of every minute that has ended. */
   flush(): void {
-    if (this.rejections.size === 0) return;
-    const pending = this.rejections;
-    this.rejections = new Map();
-    if (!this.db || !this.upsertRejection) return;
-    try {
-      this.db.exec('BEGIN');
-      try {
-        for (const [key, count] of pending) {
-          const [minute, ipHash] = key.split('\n');
-          this.upsertRejection.run(minute, ipHash, count);
-        }
-        this.db.exec('COMMIT');
-      } catch (err) {
-        this.db.exec('ROLLBACK');
-        throw err;
-      }
-    } catch (err) {
-      this.warn('flush', err);
-    }
+    this.writeRejections(minuteOf(this.now()));
   }
 
   /** Deletes rows older than the retention window; returns how many. */
@@ -151,14 +141,16 @@ export class UsageLog implements UsageSink {
     }
   }
 
+  /** Stops the timers, writes every pending minute (the current one too) and closes the DB. */
   close(): void {
     for (const t of this.timers) clearInterval(t);
     this.timers.length = 0;
-    this.flush();
+    this.writeRejections(null);
     const db = this.db;
     this.db = null;
-    this.insert = this.upsertRejection = this.deleteOld = null;
-    this.rejections.clear();
+    this.insert = this.insertRejection = this.deleteOld = null;
+    this.salt = null;
+    this.saltDay = '';
     if (!db) return;
     try {
       db.close();
@@ -167,8 +159,31 @@ export class UsageLog implements UsageSink {
     }
   }
 
-  private ipHash(callerKey: string): string {
-    const day = this.now().toISOString().slice(0, 10);
+  /** Writes and forgets pending minutes before `before` (an ISO minute start), or all of them when null. */
+  private writeRejections(before: string | null): void {
+    const due = [...this.rejections.keys()].filter((m) => before === null || m < before);
+    if (due.length === 0) return;
+    const batches = due.map((m) => [m, this.rejections.get(m)!] as const);
+    for (const m of due) this.rejections.delete(m);
+    if (!this.db || !this.insertRejection) return;
+    try {
+      this.db.exec('BEGIN');
+      try {
+        for (const [minute, counts] of batches) {
+          for (const [ipHash, count] of counts) this.insertRejection.run(minute, ipHash, count);
+        }
+        this.db.exec('COMMIT');
+      } catch (err) {
+        this.db.exec('ROLLBACK');
+        throw err;
+      }
+    } catch (err) {
+      this.warn('flush', err);
+    }
+  }
+
+  private ipHash(callerKey: string, now: Date): string {
+    const day = now.toISOString().slice(0, 10);
     if (this.salt === null || day !== this.saltDay) {
       this.salt = this.randomBytes(USAGE_SALT_BYTES);
       this.saltDay = day;
