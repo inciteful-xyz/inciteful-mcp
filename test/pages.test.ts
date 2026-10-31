@@ -80,7 +80,7 @@ function allCopy(html: string): string {
 test('copy_rules_all_pages', () => {
   // Fixed spec phrases that legitimately contain "only", removed as whole phrases before the check.
   const ALLOWED = ['looked up live only when named', 'titles only'];
-  const BANNED = /n[o'’]?t log|n.t logged|never log|no logging|without logging|unlogged|first|only/i;
+  const BANNED = /n[o'’]?t log|n.t logged|never log|no logging|without logging|unlogged|no logs?\b|nothing (?:is |gets |will be )?logged|first|only/i;
   const COMPLIANCE = /hipaa|gdpr|complian|certified/i;
   for (const [name, html] of Object.entries(ALL())) {
     assert.doesNotMatch(html, /href="[^"]*\/resources/i, `${name} links to /resources`);

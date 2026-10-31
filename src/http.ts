@@ -136,7 +136,9 @@ export function createApp(deps: AppDeps): (req: IncomingMessage, res: ServerResp
   /** HTML is noindex only off the production host. */
   const sendHtml = (req: IncomingMessage, res: ServerResponse, status: number, page: keyof Pages) => {
     const html = deps.pages[page]({ publicBaseUrl: deps.config.publicBaseUrl, ...deps.graphMeta() });
-    const headers: OutgoingHttpHeaders = { 'Content-Type': 'text/html; charset=utf-8', Vary: 'Accept', 'Cache-Control': 'no-cache', ...PAGE_HEADERS };
+    // no-transform: Cloudflare then leaves the HTML alone (Email Obfuscation would inject a script
+    // the CSP blocks, turning the support address into "[email protected]").
+    const headers: OutgoingHttpHeaders = { 'Content-Type': 'text/html; charset=utf-8', Vary: 'Accept', 'Cache-Control': 'no-cache, no-transform', ...PAGE_HEADERS };
     if (hostOf(req) !== prodHost) headers['X-Robots-Tag'] = 'noindex';
     send(req, res, status, headers, html);
   };

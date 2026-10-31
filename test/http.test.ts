@@ -69,7 +69,7 @@ test('html_get_variants_get_page', async () => {
       assert.equal(r.status, 200, String(accept));
       assert.equal(r.headers['content-type'], 'text/html; charset=utf-8');
       assert.equal(r.headers.vary, 'Accept');
-      assert.equal(r.headers['cache-control'], 'no-cache');
+      assert.equal(r.headers['cache-control'], 'no-cache, no-transform');
       assert.equal(r.body, '<!doctype html><title>landing</title>');
     }
     const head = await raw(port, 'HEAD', '/academic/mcp', { accept: '*/*' });
@@ -444,13 +444,15 @@ test('pages_send_csp_whose_hash_matches_the_copy_script', async () => {
       assert.equal(csp, `default-src 'none'; img-src 'self'; font-src 'self'; style-src 'unsafe-inline'; script-src 'sha256-${hash}'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`, path);
       assert.equal(r.headers['x-content-type-options'], 'nosniff', path);
       assert.equal(r.headers['referrer-policy'], 'strict-origin-when-cross-origin', path);
+      // Cloudflare skips Email Obfuscation (an injected script the CSP would block) under no-transform.
+      assert.equal(r.headers['cache-control'], 'no-cache, no-transform', path);
     }
   });
 });
 
 test('page_assets_are_allowlisted_and_present', () => {
   const dir = new URL('../assets/', import.meta.url);
-  const onDisk = new Set(readdirSync(dir));
+  const onDisk = new Set(readdirSync(dir).filter(f => !f.startsWith('.')));
   // Every allowlisted file exists, and every file but the example (read, not served) is allowlisted.
   for (const [name, asset] of Object.entries(ASSETS)) assert.ok(existsSync(new URL(asset.file, dir)), name);
   assert.deepEqual([...onDisk].filter(f => !Object.values(ASSETS).some(a => a.file === f)), ['example.json']);
