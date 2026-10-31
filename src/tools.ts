@@ -316,8 +316,9 @@ const REVIEW_STEPS = [
   '2. run `find_similar_papers`;',
   '3. propose 3–5 seeds and wait for the user to confirm them (a checkpoint);',
   '4. run `explore_citation_network` for `important`, `reviews` and `recent`, plus `references` and `citations` on the confirmed seeds;',
-  "5. fetch the finalists' abstracts with `get_papers`;",
-  '6. only then write: cite every paper by DOI and append the provenance.',
+  '5. add newly confirmed papers as seeds and repeat step 4 until a round adds nothing new; report the rounds and why you stopped;',
+  "6. with `get_papers`, fetch the finalists' abstracts, check retraction and preprint status, and merge duplicate versions of one work;",
+  '7. only then write: cite every paper by DOI and append the provenance.',
 ];
 
 function reviewPrompt(topic: string | undefined, seedText: string | undefined): string {
@@ -336,6 +337,8 @@ function reviewPrompt(topic: string | undefined, seedText: string | undefined): 
       ? 'The graph tools resolve DOIs, OpenAlex IDs and PMIDs themselves and report any seed they could not use.'
       : 'To resolve the seeds from the topic, use `search_literature` and pick well-cited papers that are squarely on the topic.',
     'At step 3, stop and wait for my reply before going on to step 4.',
+    'Keep a search log (tool, query, seeds or SQL, filters, retrieved_at, graph_snapshot, counts) and offer it as a methods appendix whose fields map to PRISMA-S and TARCiS.',
+    'If this is for a systematic, scoping or guideline review, say that Inciteful is not a systematic search and recommend searching multiple databases with a librarian or expert searcher.',
   ].filter((line): line is string => line !== null).join('\n');
 }
 
@@ -684,7 +687,7 @@ export function createServerFactory(deps: ToolDeps): McpServerFactory {
 
     server.registerPrompt('literature_review', {
       title: 'Literature review',
-      description: 'A guided literature review on a topic or around seed papers: find related work, confirm the seeds with you, rank the field, read the abstracts, then write with DOI citations and provenance.',
+      description: 'A guided literature review on a topic or around seed papers: find related work, confirm the seeds with you, rank the field and snowball, check the abstracts and retractions, then write with DOI citations, provenance and a search log.',
       argsSchema: z.object({
         topic: z.string().optional().describe('The research question or topic.'),
         seeds: z.string().optional().describe('Seed papers (DOIs, OpenAlex IDs or PMIDs), separated by commas or new lines.'),

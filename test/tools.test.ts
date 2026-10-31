@@ -940,9 +940,13 @@ test('prompt_requires_topic_or_seeds', async () => {
       '2. run `find_similar_papers`;',
       '3. propose 3–5 seeds and wait for the user to confirm them (a checkpoint);',
       '4. run `explore_citation_network` for `important`, `reviews` and `recent`, plus `references` and `citations` on the confirmed seeds;',
-      '5. fetch the finalists\' abstracts with `get_papers`;',
-      '6. only then write: cite every paper by DOI and append the provenance.',
+      '5. add newly confirmed papers as seeds and repeat step 4 until a round adds nothing new; report the rounds and why you stopped;',
+      '6. with `get_papers`, fetch the finalists\' abstracts, check retraction and preprint status, and merge duplicate versions of one work;',
+      '7. only then write: cite every paper by DOI and append the provenance.',
+      'Keep a search log (tool, query, seeds or SQL, filters, retrieved_at, graph_snapshot, counts) and offer it as a methods appendix whose fields map to PRISMA-S and TARCiS.',
+      'If this is for a systematic, scoping or guideline review, say that Inciteful is not a systematic search and recommend searching multiple databases with a librarian or expert searcher.',
     ]) assert.ok(body.includes(step), step);
+    assert.doesNotMatch(body, /PRISMA-compliant|systematic-review-ready/i);
     const topicOnly = await client.getPrompt({ name: 'literature_review', arguments: { topic: 'sleep' } });
     assert.doesNotMatch((topicOnly.messages[0].content as { text: string }).text, /Seed papers:/);
   });

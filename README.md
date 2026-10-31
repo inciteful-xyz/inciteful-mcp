@@ -111,7 +111,7 @@ Every tool reads data and changes nothing.
 | `read_paper` | Read open-access full text from PubMed Central. |
 | `export_citations` | Export BibTeX or RIS, for Zotero, EndNote and other reference managers. |
 
-The `literature_review` prompt runs the iterative snowball with you: resolve your seeds, find similar papers, agree 3–5 seeds, explore the network, read the finalists' abstracts, then write with a DOI for every paper.
+The `literature_review` prompt runs the iterative snowball with you: resolve your seeds, find similar papers, agree 3–5 seeds, explore the network and repeat with new seeds until a round adds nothing new, check the finalists' abstracts, retractions and duplicate versions, then write with a DOI for every paper and a search log whose fields you can map to PRISMA-S.
 
 Every citation-graph result names the method that ranked it and carries a provenance block (graph snapshot, graph size, method, filters and the SQL that ran), so you can report your citation searching.
 
