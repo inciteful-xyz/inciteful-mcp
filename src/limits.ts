@@ -13,8 +13,12 @@ export const TOOL_NAMES = [
 ] as const;
 export type ToolName = (typeof TOOL_NAMES)[number];
 
-/** Ceiling on one tool call. The graph call behind a timed-out tool call keeps running upstream. */
-export const TOOL_CEILING_MS = 90_000;
+/**
+ * Ceiling on one tool call, under the SDK clients' 60 s default request timeout, so the client gets
+ * the retry message rather than its own timeout. The graph call behind a timed-out tool call keeps
+ * running upstream.
+ */
+export const TOOL_CEILING_MS = 55_000;
 /** Longest wait for a graph's `metadata` after its query; the stats are dropped when it runs out. */
 export const METADATA_WAIT_MS = 5_000;
 /** Graph builds in flight at once. A build is any call to `/query`, `/paper/similar` or `/connector`. */
@@ -38,17 +42,21 @@ export const MAX_QUERY_CHARS = 1_000;
 /** Characters in one paper id or seed (a DOI, OpenAlex ID, PMID or PMCID). */
 export const MAX_ID_CHARS = 300;
 /** `read_paper`'s `max_chars`. */
-export const MAX_READ_CHARS = 50_000;
-/** Serialized result size (`Buffer.byteLength` of the JSON) above which rows are trimmed. */
-export const OUTPUT_CAP_BYTES = 60_000;
+export const MAX_READ_CHARS = 40_000;
+/**
+ * Serialized result size (`Buffer.byteLength` of the JSON) above which rows are trimmed. Bytes are
+ * never fewer than characters, so a result stays under Claude Code's 50,000-character threshold for
+ * saving a result to a file.
+ */
+export const OUTPUT_CAP_BYTES = 45_000;
 /**
  * connect_papers returns at most this many paths, shortest first. A path adds up to its middle
- * papers as rows, at about 450 bytes each with real titles, journals and authors, plus its edges:
- * about 2.1 KB for a 5-hop path whose papers are all new. 25 of those come to about 53 KB with the
+ * papers as rows, at about 450–500 bytes each with real titles, journals and authors, plus its edges:
+ * about 2.2 KB for a 5-hop path whose papers are all new. 18 of those come to about 41 KB with the
  * provenance, so the result fits the output cap without capResult trimming rows (which would leave
- * paths naming papers that aren't in rows), and 25 is more than an assistant can discuss.
+ * paths naming papers that aren't in rows), and 18 is more than an assistant can discuss.
  */
-export const MAX_CONNECTOR_PATHS = 25;
+export const MAX_CONNECTOR_PATHS = 18;
 /** Seed-set links to the web app carry at most this many ids, to fit URL limits. */
 export const URL_SEED_CAP = 50;
 

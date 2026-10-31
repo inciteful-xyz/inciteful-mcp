@@ -1,5 +1,6 @@
-// The HTTP front: routing at /academic/mcp (spec §4.2), CORS, the rate limit, the request context
-// for usage rows, and the SIGTERM drain. Nothing here logs request data: the one warning is a fixed string.
+// The HTTP front: routing at /academic/mcp (spec §4.2), CORS, the Origin check, the rate limit, the
+// request context for usage rows, and the SIGTERM drain. Nothing here logs request data: the one
+// warning is a fixed string.
 
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { readFile } from 'node:fs/promises';
@@ -106,6 +107,27 @@ export type AppDeps = {
   assetsDir: string;
 };
 
+/** http: origins allowed besides https: ones, on any port: MCP Inspector and other local tools. */
+const LOCAL_HOSTNAMES = new Set(['localhost', '127.0.0.1', '[::1]']);
+
+/**
+ * The spec's Origin check: a present, invalid Origin gets a 403. Any https: origin is valid on
+ * purpose: the server is public, takes no credentials and sends CORS `*`, so any page may call it.
+ * Invalid: `null`, anything but a bare origin, and http: other than local hosts. Requests without an
+ * Origin (non-browser clients) aren't checked. Host isn't checked either: the server is reached
+ * under several hostnames (the edge Worker's academic-mcp-origin.incitefulmed.com, staging, kubectl
+ * port-forward), Cloudflare routes by Host, and DNS rebinding gains nothing against a public server
+ * without auth.
+ */
+export function originAllowed(origin: string): boolean {
+  if (origin === 'null') return false;
+  let url: URL;
+  try { url = new URL(origin); } catch { return false; }
+  // Scheme, host and port, nothing more; an opaque origin (file:, data:) serializes as "null".
+  if (url.origin === 'null' || url.href !== `${url.origin}/`) return false;
+  return url.protocol === 'https:' || (url.protocol === 'http:' && LOCAL_HOSTNAMES.has(url.hostname));
+}
+
 /** `Host` without a default port, lower-cased. */
 function hostOf(req: IncomingMessage): string {
   return (req.headers.host ?? '').toLowerCase().replace(/:(80|443)$/, '');
@@ -155,7 +177,17 @@ export function createApp(deps: AppDeps): (req: IncomingMessage, res: ServerResp
     }
   };
 
+  /** A 403 for an Origin `originAllowed` refuses; true when sent. The JSON-RPC error has no id. */
+  const refuseOrigin = (req: IncomingMessage, res: ServerResponse): boolean => {
+    const origin = req.headers.origin;
+    if (origin === undefined || originAllowed(origin)) return false;
+    const body = JSON.stringify({ jsonrpc: '2.0', error: { code: -32000, message: 'Origin not allowed.' } });
+    sendOther(req, res, 403, { 'Content-Type': 'application/json', ...MCP_HEADERS }, body);
+    return true;
+  };
+
   async function serveMcp(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (refuseOrigin(req, res)) return;
     const key = callerKey(req);
     const verdict = deps.limiter.check(key);
     if (!verdict.ok) {
@@ -210,7 +242,10 @@ export function createApp(deps: AppDeps): (req: IncomingMessage, res: ServerResp
 
     if (pathname === MCP_PATH || pathname === MCP_SLASH) {
       if (method === 'POST') return serveMcp(req, res);
-      if (method === 'OPTIONS') return sendOther(req, res, 204, CORS_PREFLIGHT);
+      if (method === 'OPTIONS') {
+        if (!refuseOrigin(req, res)) sendOther(req, res, 204, CORS_PREFLIGHT);
+        return;
+      }
       if (method === 'GET' && (req.headers.accept ?? '').toLowerCase().includes('text/event-stream')) {
         return methodNotAllowed(req, res, ALLOW_MCP, true);
       }

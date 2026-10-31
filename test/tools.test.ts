@@ -5,6 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { AjvJsonSchemaValidator } from '@modelcontextprotocol/client/validators/ajv';
 import { createMcpHandler } from '@modelcontextprotocol/server';
+import { INSTRUCTIONS } from '../src/instructions.js';
 import { createServerFactory, QUERY_EXAMPLES, type ToolSettled } from '../src/tools.js';
 import { createUrls } from '../src/urls.js';
 import { OpenAlexClient, type Work } from '../src/openalex.js';
@@ -13,7 +14,9 @@ import type { ConnectorResult, GraphClient, SimilarPaper } from '../src/graph.js
 import {
   BuildDeadlineError, GraphError, GraphUnavailableError, OpenAlexBudgetExhausted, OpenAlexRateLimited, QueryTimeoutError,
 } from '../src/errors.js';
+import { MAX_CONNECTOR_PATHS, MAX_READ_CHARS, METADATA_WAIT_MS, OUTPUT_CAP_BYTES, TOOL_CEILING_MS } from '../src/limits.js';
 import type { BuildCapLike, SeedResolution } from '../src/types.js';
+import { copyRuleHit } from './copyrules.js';
 
 const NOW = new Date('2026-10-30T18:02:11.000Z');
 const BASE = new URL('https://incitefulmed.com/academic/mcp');
@@ -233,18 +236,52 @@ test('descriptions carry the required facts', async () => {
     const { tools } = await client.listTools();
     const d = Object.fromEntries(tools.map(t => [t.name, t.description ?? '']));
     assert.match(d.find_similar_papers, /default first step/);
+    assert.match(d.search_literature, /live keyword search of OpenAlex.*not of the citation graph snapshot/);
+    assert.match(d.search_literature, /titles, abstracts and full text where OpenAlex has it/);
+    assert.match(d.search_literature, /not a systematic search/);
     const q = d.query_citation_graph;
     for (const fact of ['title_search(paper_id, search_text)', 'no edge table', 'in-graph', 'W0', 'cocite is NULL',
       'distance 0', 'ror.organizations', 'title_terms', 'metadata', 'OFFSET', 'single SELECT', "the query's trailing LIMIT"]) {
       assert.ok(q.includes(fact), `query_citation_graph mentions ${fact}`);
     }
-    assert.equal(QUERY_EXAMPLES.length, 3);
+    assert.equal(QUERY_EXAMPLES.length, 2);
     for (const sql of QUERY_EXAMPLES) assert.ok(q.includes(sql), 'example in the description');
     assert.match(d.explore_citation_network, /titles only \(not abstracts or full text\), with Porter stemming/);
     for (const [name, desc] of Object.entries(d)) {
       assert.doesNotMatch(desc, /(?<!read-)\bonly\b(?! \(not abstracts)/i, `${name}: no "only"`);
       assert.doesNotMatch(desc, /\bfirst\b(?! step)/i, `${name}: no "first" superlative`);
       assert.doesNotMatch(desc, /not (be )?logged|never logged|no logs/i, `${name}: no logging claim`);
+    }
+  });
+});
+
+test('instructions_fit_and_follow_the_copy_rules', () => {
+  // Claude Code cuts instructions at 4,096 characters; ChatGPT weighs the first 512 most.
+  assert.ok(INSTRUCTIONS.length <= 4_096, `${INSTRUCTIONS.length} characters`);
+  assert.match(INSTRUCTIONS.slice(0, 512), /Use it for literature searches, related work, .+ and BibTeX\/RIS export\./);
+  assert.equal(INSTRUCTIONS, INSTRUCTIONS.trim());
+  const hit = copyRuleHit(INSTRUCTIONS);
+  assert.equal(hit, null, `instructions: "${hit}"`);
+  assert.doesNotMatch(INSTRUCTIONS, /\/resources|OpenCitations|Semantic Scholar|PRISMA-compliant|systematic-review-ready/i);
+});
+
+test('initialize_and_discover_return_the_instructions', async () => {
+  // Legacy initialize.
+  await withClient({}, async ({ client }) => {
+    assert.equal(client.getInstructions(), INSTRUCTIONS);
+  }, false);
+  // 2026-07-28: connect probes server/discover.
+  await withClient({}, async ({ client }) => {
+    assert.equal(client.getDiscoverResult()?.instructions, INSTRUCTIONS);
+    assert.equal(client.getInstructions(), INSTRUCTIONS);
+  });
+});
+
+test('descriptions_fit_claude_codes_cut', async () => {
+  // Claude Code cuts a tool description loaded upfront at 4,096 characters.
+  await withClient({}, async ({ client }) => {
+    for (const t of (await client.listTools()).tools) {
+      assert.ok((t.description ?? '').length <= 4_000, `${t.name}: ${t.description?.length} characters`);
     }
   });
 });
@@ -284,14 +321,12 @@ function graphDb(multiple: boolean): DatabaseSync {
 test('query_examples_run_on_the_real_schema', () => {
   const single = graphDb(false);
   const multiple = graphDb(true);
-  const [byRank, byAuthor, byYear] = QUERY_EXAMPLES;
+  const [byRank, byAuthor] = QUERY_EXAMPLES;
   // Example 1 (single seed): titles mentioning stimulation, seed excluded, since 2020.
   assert.deepEqual(single.prepare(byRank).all().map(r => r.paper_id), ['W2', 'W3']);
   // Example 2: authors ranked; runs on both graphs.
   assert.equal(single.prepare(byAuthor).all().length, 4);
   assert.equal(multiple.prepare(byAuthor).all().length, 6);
-  // Example 3 (several seeds): the seeds' neighbours by year, W0 and the seeds excluded.
-  assert.deepEqual(multiple.prepare(byYear).all().map(r => [r.published_year, r.papers]), [[2022, 1], [2021, 1]]);
   for (const sql of QUERY_EXAMPLES) {
     assert.doesNotMatch(sql, /\boffset\b/i);
     multiple.prepare(sql).all();
@@ -650,8 +685,9 @@ test('build cap keys and deadline', async () => {
       ['query', ['W1', 'W2'], 'SELECT 1', 9], ['metadata', ['W1', 'W2']],
       ['connector', 'W1', 'W2', false],
     ]);
-    // On a still clock: builds get now + 90 s; metadata waits min(deadline, now + 5 s).
-    assert.deepEqual(calls.cap.map(c => c.deadlineAt - NOW.getTime()), [90_000, 90_000, 90_000, 5_000, 90_000, 5_000, 90_000]);
+    // On a still clock: builds get now + the ceiling; metadata waits min(deadline, now + 5 s).
+    const [C, M] = [TOOL_CEILING_MS, METADATA_WAIT_MS];
+    assert.deepEqual(calls.cap.map(c => c.deadlineAt - NOW.getTime()), [C, C, C, M, C, M, C]);
   });
 });
 
@@ -663,13 +699,13 @@ test('deadline_computed_once_per_call', async () => {
     await call('query_citation_graph', { seeds: ['W1'], sql: 'SELECT 1' });
     const [build, metadata] = calls.cap.map(c => c.deadlineAt);
     // The first read of the call (reads = 0) plus the ceiling.
-    assert.equal(build, NOW.getTime() + 90_000);
+    assert.equal(build, NOW.getTime() + TOOL_CEILING_MS);
     // Metadata: a later read plus 5 s, still under the call's deadline.
     assert.ok(metadata < build && (metadata - NOW.getTime() - 5_000) % 1000 === 0);
     reads = 0;
     calls.cap.length = 0;
     await call('explore_citation_network', { seeds: ['W1'], analysis: 'important' });
-    assert.equal(calls.cap[0].deadlineAt, NOW.getTime() + 90_000);
+    assert.equal(calls.cap[0].deadlineAt, NOW.getTime() + TOOL_CEILING_MS);
   });
 });
 
@@ -735,11 +771,11 @@ test('read_paper', async () => {
     assert.equal(settled[0].outcome, 'upstream_unavailable');
   });
   // max_chars is the only bound on the text: a large chunk comes back whole, with the reader's next_offset.
-  const big = 'é'.repeat(50_000);
+  const big = 'é'.repeat(MAX_READ_CHARS);
   await withClient({ readPaper: async (_w, offset) => ({ text: big, nextOffset: offset + big.length, sha256: 'ab'.repeat(32), license: null, links: [] }) }, async ({ call }) => {
-    const sc = (await call('read_paper', { id: 'W1', offset: 100, max_chars: 50_000 })).structuredContent!;
+    const sc = (await call('read_paper', { id: 'W1', offset: 100, max_chars: MAX_READ_CHARS })).structuredContent!;
     assert.equal(sc.text, big);
-    assert.equal(sc.next_offset, 50_100);
+    assert.equal(sc.next_offset, MAX_READ_CHARS + 100);
   });
   await withClient({ readPaper: async () => ({ nextOffset: null, sha256: null, license: null, links: [{ url: 'https://example.org/x.pdf', format: 'pdf', source: 'Repo', is_oa: true, license: null, version: null, priority: 0 }] }) }, async ({ call }) => {
     const sc = (await call('read_paper', { id: 'W1' })).structuredContent!;
@@ -761,7 +797,7 @@ test('input bounds', async () => {
       ['query_citation_graph', { seeds: ['W1'], sql: 'SELECT 1', limit: 501 }],
       ['read_paper', { id: 'W1', offset: -1 }],
       ['read_paper', { id: 'W1', max_chars: 0 }],
-      ['read_paper', { id: 'W1', max_chars: 50_001 }],
+      ['read_paper', { id: 'W1', max_chars: MAX_READ_CHARS + 1 }],
     ];
     for (const [name, args] of bad) {
       const r = await call(name, args);
@@ -773,7 +809,7 @@ test('input bounds', async () => {
     for (const [name, args] of [
       ['search_literature', { query: 'x', limit: 50 }], ['get_papers', { ids: Array.from({ length: 100 }, (_, i) => `W${i}`) }],
       ['find_similar_papers', { seeds: Array.from({ length: 500 }, (_, i) => `W${i}`), limit: 100 }],
-      ['query_citation_graph', { seeds: ['W1'], sql: 'SELECT 1', limit: 500 }], ['read_paper', { id: 'W1', offset: 0, max_chars: 50_000 }],
+      ['query_citation_graph', { seeds: ['W1'], sql: 'SELECT 1', limit: 500 }], ['read_paper', { id: 'W1', offset: 0, max_chars: MAX_READ_CHARS }],
     ] as Array<[string, Record<string, unknown>]>) {
       assert.ok(!(await call(name, args)).isError, name);
     }
@@ -834,7 +870,7 @@ test('output_capped_flagged', async () => {
     const sc = r.structuredContent!;
     assert.equal(sc.truncated, true);
     assert.ok(sc.rows.length < 50 && sc.rows.length > 0);
-    assert.ok(Buffer.byteLength(JSON.stringify(sc)) <= 60_000);
+    assert.ok(Buffer.byteLength(JSON.stringify(sc)) <= OUTPUT_CAP_BYTES);
     assert.ok(sc.diagnostics.advisories.includes('Output truncated; narrow the request (lower limit, fewer seeds, a title filter).'));
   });
   await withClient({}, async ({ call }) => {
@@ -904,9 +940,13 @@ test('prompt_requires_topic_or_seeds', async () => {
       '2. run `find_similar_papers`;',
       '3. propose 3–5 seeds and wait for the user to confirm them (a checkpoint);',
       '4. run `explore_citation_network` for `important`, `reviews` and `recent`, plus `references` and `citations` on the confirmed seeds;',
-      '5. fetch the finalists\' abstracts with `get_papers`;',
-      '6. only then write: cite every paper by DOI and append the provenance.',
+      '5. add newly confirmed papers as seeds and repeat step 4 until a round adds nothing new; report the rounds and why you stopped;',
+      '6. with `get_papers`, fetch the finalists\' abstracts, check retraction and preprint status, and merge duplicate versions of one work;',
+      '7. only then write: cite every paper by DOI and append the provenance.',
+      'Keep a search log (tool, query, seeds or SQL, filters, retrieved_at, graph_snapshot, counts) and offer it as a methods appendix whose fields map to PRISMA-S and TARCiS.',
+      'If this is for a systematic, scoping or guideline review, say that Inciteful is not a systematic search and recommend searching multiple databases with a librarian or expert searcher.',
     ]) assert.ok(body.includes(step), step);
+    assert.doesNotMatch(body, /PRISMA-compliant|systematic-review-ready/i);
     const topicOnly = await client.getPrompt({ name: 'literature_review', arguments: { topic: 'sleep' } });
     assert.doesNotMatch((topicOnly.messages[0].content as { text: string }).text, /Seed papers:/);
   });
@@ -927,7 +967,7 @@ test('ceiling_aborts_a_hung_resolve', async () => {
     await withClient({ resolve: (_inputs, signal) => { seen = signal; reached(); return new Promise(() => {}); } }, async ({ call, settled }) => {
       const pending = call('find_similar_papers', { seeds: ['W1'] });
       await started;
-      mock.timers.tick(89_999);
+      mock.timers.tick(TOOL_CEILING_MS - 1);
       await settle();
       assert.equal(seen?.aborted, false, 'not aborted before the ceiling');
       mock.timers.tick(1);
@@ -956,7 +996,7 @@ test('a_build_past_the_deadline_times_out_and_keeps_running', async () => {
     await withClient({ cap, similar: () => { reached(); return new Promise(() => {}); } }, async ({ call, calls, settled }) => {
       const pending = call('find_similar_papers', { seeds: ['W1'] });
       await started;
-      mock.timers.tick(90_000);
+      mock.timers.tick(TOOL_CEILING_MS);
       const r = await pending;
       assert.equal(text(r), 'Still working upstream; retry in about a minute.');
       assert.deepEqual(settled.map(e => e.outcome), ['timeout']);
@@ -977,7 +1017,7 @@ test('a_late_rejection_after_the_ceiling_is_handled', async () => {
     await withClient({ resolve: () => { reached(); return new Promise((_, reject) => { fail = reject; }); } }, async ({ call }) => {
       const pending = call('find_similar_papers', { seeds: ['W1'] });
       await started;
-      mock.timers.tick(90_000);
+      mock.timers.tick(TOOL_CEILING_MS);
       assert.equal(text(await pending), 'Still working upstream; retry in about a minute.');
       fail(new GraphUnavailableError(null));
       await settle();
@@ -989,7 +1029,7 @@ test('a_late_rejection_after_the_ceiling_is_handled', async () => {
   }
 });
 
-test('connector_keeps_the_25_shortest_paths_without_dangling_references', async () => {
+test('connector_keeps_the_shortest_paths_without_dangling_references', async () => {
   // 1,000 paths of 3 to 6 nodes between W1 and W2, through 3,000 distinct middle papers, longest first.
   const paths: string[][] = [];
   const papers = new Map<string, SimilarPaper>([['W1', paper('W1', 0)], ['W2', paper('W2', 0)]]);
@@ -1004,29 +1044,57 @@ test('connector_keeps_the_25_shortest_paths_without_dangling_references', async 
   const connector = async () => ({ paths, papers: [...papers.values()], connections, num_paths: 1000, papers_searched: 50_000, max_hops: 5 });
   await withClient({ connector }, async ({ call }) => {
     const r = await call('connect_papers', { from: 'W1', to: 'W2', extended: true });
-    assert.ok(Buffer.byteLength(text(r)) <= 60_000);
+    assert.ok(Buffer.byteLength(text(r)) <= OUTPUT_CAP_BYTES);
     const sc = r.structuredContent!;
     assert.equal(sc.truncated, true);
-    assert.equal(sc.paths.length, 25);
-    assert.ok(sc.diagnostics.advisories.includes('Showing 25 of 1000 paths (shortest first); the longer ones were left out.'));
+    assert.equal(sc.paths.length, MAX_CONNECTOR_PATHS);
+    assert.ok(sc.diagnostics.advisories.includes(`Showing ${MAX_CONNECTOR_PATHS} of 1000 paths (shortest first); the longer ones were left out.`));
     // The shortest are kept: every 4th input path has one middle paper (3 nodes), and there are 250 of them.
-    assert.deepEqual(sc.paths.map((p: string[]) => p.length), Array(25).fill(3));
+    assert.deepEqual(sc.paths.map((p: string[]) => p.length), Array(MAX_CONNECTOR_PATHS).fill(3));
     assert.deepEqual(sc.paths[0], ['W1', 'W10012', 'W2'], 'a stable sort keeps input order among equals');
-    assert.deepEqual(sc.provenance.hops, Array(25).fill(2));
+    assert.deepEqual(sc.provenance.hops, Array(MAX_CONNECTOR_PATHS).fill(2));
     const rowIds = new Set(sc.rows.map((p: any) => p.paper_id));
     for (const p of sc.paths) for (const id of p) assert.ok(rowIds.has(id), `path node ${id} in rows`);
     for (const e of sc.edges) assert.ok(rowIds.has(e.citing) && rowIds.has(e.cited), 'edge endpoints in rows');
     assert.equal(sc.rows.length, new Set(sc.paths.flat()).size, 'no paper off the kept paths');
-    assert.equal(sc.edges.length, 50);
+    assert.equal(sc.edges.length, 2 * MAX_CONNECTOR_PATHS);
     assert.equal(sc.diagnostics.advisories.filter((a: string) => a.startsWith('Output truncated')).length, 0, 'capResult had nothing left to trim');
   });
-  // 25 paths or fewer: all kept, nothing flagged.
-  const few = paths.slice(0, 25);
-  await withClient({ connector: async () => ({ paths: few, papers: [...papers.values()], connections, num_paths: 25, papers_searched: 50_000, max_hops: 5 }) }, async ({ call }) => {
+  // MAX_CONNECTOR_PATHS paths or fewer: all kept, nothing flagged.
+  const few = paths.slice(0, MAX_CONNECTOR_PATHS);
+  await withClient({ connector: async () => ({ paths: few, papers: [...papers.values()], connections, num_paths: MAX_CONNECTOR_PATHS, papers_searched: 50_000, max_hops: 5 }) }, async ({ call }) => {
     const sc = (await call('connect_papers', { from: 'W1', to: 'W2', extended: true })).structuredContent!;
-    assert.equal(sc.paths.length, 25);
+    assert.equal(sc.paths.length, MAX_CONNECTOR_PATHS);
     assert.equal(sc.truncated, false);
     assert.equal(sc.diagnostics.advisories.filter((a: string) => a.startsWith('Showing')).length, 0);
+  });
+});
+
+test('connector_worst_case_fits_the_output_cap_untrimmed', async () => {
+  // MAX_CONNECTOR_PATHS 5-hop paths, every middle paper new, with real-sized titles, journals and authors.
+  const papers: SimilarPaper[] = [paper('W1', 0), paper('W2', 0)];
+  const paths: string[][] = [];
+  const connections: Array<{ citing: string; cited: string }> = [];
+  for (let i = 0; i < MAX_CONNECTOR_PATHS; i++) {
+    const middle = Array.from({ length: 4 }, (_, j) => `W${4_000_000_000 + i * 4 + j}`);
+    for (const id of middle) {
+      papers.push({
+        ...paper(id, 0), doi: `10.1016/j.neuroimage.2021.${id.slice(1)}`,
+        title: 'Transcutaneous auricular vagus nerve stimulation modulates resting-state connectivity of the locus coeruleus in healthy adults',
+        journal: 'Brain Stimulation: Basic, Translational, and Clinical Research',
+        author: [{ name: 'Alexandra Montgomery' }, { name: 'Jean-Baptiste Lefèvre' }, { name: 'Wiremu Hēnare' }],
+      });
+    }
+    const path = ['W1', ...middle, 'W2'];
+    paths.push(path);
+    for (let j = 1; j < path.length; j++) connections.push({ citing: path[j - 1], cited: path[j] });
+  }
+  const connector = async () => ({ paths, papers, connections, num_paths: paths.length, papers_searched: 50_000, max_hops: 5 });
+  await withClient({ connector }, async ({ call }) => {
+    const sc = (await call('connect_papers', { from: 'W1', to: 'W2', extended: true })).structuredContent!;
+    assert.equal(sc.truncated, false, 'capResult trimmed nothing');
+    assert.equal(sc.rows.length, 2 + 4 * MAX_CONNECTOR_PATHS);
+    assert.ok(Buffer.byteLength(JSON.stringify(sc)) <= OUTPUT_CAP_BYTES * 0.95, 'with room to spare');
   });
 });
 
@@ -1066,13 +1134,13 @@ test('id_length_bounded', async () => {
 });
 
 test('metadata_deadline_never_exceeds_the_call_deadline', async () => {
-  // The clock jumps to NOW + 88 s once the query has run, so now + 5 s would pass the call's deadline.
+  // The clock jumps to 2 s before the ceiling once the query has run, so now + 5 s would pass the call's deadline.
   let late = false;
-  const now = () => new Date(NOW.getTime() + (late ? 88_000 : 0));
+  const now = () => new Date(NOW.getTime() + (late ? TOOL_CEILING_MS - 2_000 : 0));
   const query = async () => { late = true; return [{ paper_id: 'W9' }]; };
   await withClient({ now, query }, async ({ call, calls }) => {
     await call('explore_citation_network', { seeds: ['W1'], analysis: 'important' });
     const metadata = calls.cap.find(c => JSON.parse(c.key)[0] === 'metadata')!;
-    assert.equal(metadata.deadlineAt, NOW.getTime() + 90_000);
+    assert.equal(metadata.deadlineAt, NOW.getTime() + TOOL_CEILING_MS);
   });
 });

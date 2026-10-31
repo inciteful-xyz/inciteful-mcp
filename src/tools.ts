@@ -9,6 +9,7 @@ import {
   BuildDeadlineError, GraphError, GraphUnavailableError, OpenAlexBudgetExhausted, OpenAlexError, OpenAlexRateLimited, QueryTimeoutError, TitleFilterError,
 } from './errors.js';
 import type { ConnectorPaper, GraphClient, SimilarPaper } from './graph.js';
+import { INSTRUCTIONS } from './instructions.js';
 import {
   DEFAULT_SQL_LIMIT, MAX_ANALYSIS_LIMIT, MAX_CONNECTOR_PATHS, MAX_ID_CHARS, MAX_PAPER_IDS, MAX_QUERY_CHARS, MAX_READ_CHARS, MAX_SEARCH_LIMIT, MAX_SEEDS, MAX_SQL_CHARS, MAX_SQL_LIMIT, MIN_SQL_LIMIT,
   METADATA_WAIT_MS, TOOL_CEILING_MS, URL_SEED_CAP, type ToolName,
@@ -212,13 +213,13 @@ const TITLE_FILTER = 'They match titles only (not abstracts or full text), with 
 export const QUERY_EXAMPLES = [
   "SELECT paper_id, title, published_year, page_rank FROM papers WHERE distance > 0 AND published_year >= 2020 AND paper_id IN (SELECT paper_id FROM title_search('search_text: stimulation')) ORDER BY page_rank DESC LIMIT 20",
   'SELECT author_id, name, COUNT(*) AS papers, SUM(partial_page_rank) AS influence FROM authors GROUP BY author_id, name ORDER BY influence DESC LIMIT 20',
-  'SELECT published_year, COUNT(*) AS papers, SUM(num_cited_by) AS in_graph_citations FROM papers WHERE distance = 2 GROUP BY published_year ORDER BY published_year DESC LIMIT 30',
 ] as const;
 
 const DESCRIPTIONS: Record<ToolName, string> = {
   search_literature: [
-    'Search OpenAlex (CC0 metadata) for papers by keywords, ranked by relevance.',
-    'Use it to find candidate seed papers when you have a topic but no DOIs yet, then pass their IDs to find_similar_papers or explore_citation_network.',
+    'A live keyword search of OpenAlex (CC0 metadata), not of the citation graph snapshot. It matches titles, abstracts and full text where OpenAlex has it, ranked by relevance.',
+    'Use it to find candidate seed papers when you have a topic but no DOIs yet, then pass their IDs to find_similar_papers or explore_citation_network;',
+    'it is not a systematic search.',
     'Returns OpenAlex ID, DOI, title, year, venue, global cited_by_count, type, is_retracted and has_abstract; page with next_cursor.',
     `limit is at most ${MAX_SEARCH_LIMIT}. For abstracts and authors use get_papers.`,
   ].join(' '),
@@ -254,12 +255,13 @@ const DESCRIPTIONS: Record<ToolName, string> = {
   ].join(' '),
   query_citation_graph: [
     `Run your own read-only SQLite query on the citation graph Inciteful builds around 1–${MAX_SEEDS} seed papers (depth 2, the same graph as explore_citation_network).`,
-    'Use it when the fixed analyses in explore_citation_network do not answer the question.',
+    "Use it when explore_citation_network's fixed analyses don't answer the question.",
     `Rules: a single SELECT statement. Rows returned: the limit argument if given, else the query's trailing LIMIT, else ${DEFAULT_SQL_LIMIT}; at most ${MAX_SQL_LIMIT}.`,
-    'OFFSET (and LIMIT a, b) is rejected before sending; page with a narrower WHERE or an ORDER BY instead.',
+    'OFFSET (and LIMIT a, b) is rejected; page with a narrower WHERE or an ORDER BY instead.',
     '\n\nSchema:',
-    '\n- papers(paper_id TEXT: OpenAlex ID such as W2919115771; doi TEXT without the https://doi.org/ prefix; authors TEXT: JSON array of {author_id, name, sequence, position, institution {id, name, ror}};',
-    'num_authors INTEGER; title TEXT; published_year INTEGER; journal TEXT; num_citing INTEGER; num_cited_by INTEGER; distance INTEGER; page_rank REAL; adamic_adar REAL; cocite REAL)',
+    '\n- papers(paper_id TEXT: OpenAlex ID (W…); doi TEXT without the https://doi.org/ prefix; authors TEXT: JSON array of {author_id, name, sequence, position, institution {id, name, ror}};',
+    'num_authors INTEGER; title TEXT; published_year INTEGER; journal TEXT; num_citing INTEGER; num_cited_by INTEGER; distance INTEGER; page_rank REAL; adamic_adar REAL; cocite REAL).',
+    'num_citing and num_cited_by are in-graph counts (citations between papers in this graph); get_papers has the global cited_by_count.',
     '\n- authors(author_id TEXT: OpenAlex author ID without the A prefix; paper_id TEXT; name TEXT; sequence INTEGER, from 0; affiliation TEXT;',
     'affiliation_id TEXT: OpenAlex institution ID without the I prefix; ror TEXT: ROR URL; published_year INTEGER; partial_page_rank REAL: the author\'s share of the paper\'s page_rank)',
     '\n- metadata(name TEXT, value TEXT): one row each for graph_depth, graph_snapshot, prune_threshold, highly_cited_not_expanded, seeds_not_expanded, paper_count, citation_count.',
@@ -267,22 +269,20 @@ const DESCRIPTIONS: Record<ToolName, string> = {
     '\n- title_search(paper_id, search_text): an FTS5 index of the titles with Porter stemming; search_text holds the titles (paper IDs are indexed too).',
     "Query it as a table function, starting the match text with the column filter: SELECT paper_id FROM title_search('search_text: vagus AND nerve'). AND, OR, NOT and parentheses work; bm25(title_search) ranks matches, smaller is better.",
     '\n- title_terms(term, doc_count): the stemmed title terms and the number of papers each appears in, leaving out a few common words.',
-    '\n- ror.organizations(ror_id, ror_url, display_name, status, established, types, country_code, country_name, city, latitude, longitude),',
-    'ror.names(ror_id, name, name_types, language), ror.external_ids(ror_id, id_type, preferred_id, external_id), ror.relationships(ror_id, related_ror_id, related_name, relationship_type):',
-    'the Research Organization Registry (active organizations), attached as ror. Join it with authors.ror = ror.organizations.ror_url.',
+    '\n- The Research Organization Registry (active organizations), attached as ror; join on authors.ror = ror.organizations.ror_url:',
+    'organizations(ror_id, ror_url, display_name, status, established, types, country_code, country_name, city, latitude, longitude),',
+    'names(ror_id, name, name_types, language), external_ids(ror_id, id_type, preferred_id, external_id), relationships(ror_id, related_ror_id, related_name, relationship_type).',
     '\n\nWhat the schema cannot tell you:',
-    '\n- There is no edge table, so SQL cannot tell which papers cite which, or separate citing papers from cited ones.',
+    '\n- There is no edge table, so SQL cannot tell which papers cite which.',
     "For a seed's references or citing papers use explore_citation_network with analysis 'references' or 'citations'.",
-    '\n- num_citing and num_cited_by are in-graph counts (citations between papers in this graph), not global citation counts; get_papers has the global cited_by_count.',
     '\n- Papers with no citation inside the graph have NULL num_citing, num_cited_by, distance, page_rank, adamic_adar and cocite.',
-    '\n- Seed distance: with one seed, the seed is at distance 0, the papers it cites or is cited by at 1 and their neighbours at 2, so distance > 0 leaves the seed out.',
-    'With several seeds the graph hangs off a synthetic paper W0 ("Temp Paper", year 1900) that cites every seed: W0 is at distance 0, the seeds at 1 and their neighbours at 2,',
+    '\n- With one seed, the seed is at distance 0, its citing and cited papers at 1 and their neighbours at 2, so distance > 0 leaves the seed out.',
+    'With several seeds a synthetic paper W0 ("Temp Paper", year 1900) cites every seed: W0 is at distance 0, the seeds at 1 and their neighbours at 2,',
     "so distance > 1 leaves out W0 and the seeds; otherwise add paper_id <> 'W0'.",
-    '\n- With several seeds, cocite is NULL in every row (nothing cites W0) and adamic_adar is measured against W0.',
+    'Then cocite is NULL in every row (nothing cites W0) and adamic_adar is measured against W0.',
     '\n\nExamples:',
     `\n1. One seed: the highest-PageRank papers since 2020 with "stimulation" in the title: ${QUERY_EXAMPLES[0]}`,
     `\n2. Authors ranked by their share of PageRank: ${QUERY_EXAMPLES[1]}`,
-    `\n3. Several seeds: papers per year among the seeds' direct neighbours: ${QUERY_EXAMPLES[2]}`,
   ].join(' '),
   read_paper: [
     'Read the full text of an open-access paper from PubMed Central (PMC BioC) in chunks: pass offset (0 to start) and max_chars',
@@ -316,8 +316,9 @@ const REVIEW_STEPS = [
   '2. run `find_similar_papers`;',
   '3. propose 3–5 seeds and wait for the user to confirm them (a checkpoint);',
   '4. run `explore_citation_network` for `important`, `reviews` and `recent`, plus `references` and `citations` on the confirmed seeds;',
-  "5. fetch the finalists' abstracts with `get_papers`;",
-  '6. only then write: cite every paper by DOI and append the provenance.',
+  '5. add newly confirmed papers as seeds and repeat step 4 until a round adds nothing new; report the rounds and why you stopped;',
+  "6. with `get_papers`, fetch the finalists' abstracts, check retraction and preprint status, and merge duplicate versions of one work;",
+  '7. only then write: cite every paper by DOI and append the provenance.',
 ];
 
 function reviewPrompt(topic: string | undefined, seedText: string | undefined): string {
@@ -336,6 +337,8 @@ function reviewPrompt(topic: string | undefined, seedText: string | undefined): 
       ? 'The graph tools resolve DOIs, OpenAlex IDs and PMIDs themselves and report any seed they could not use.'
       : 'To resolve the seeds from the topic, use `search_literature` and pick well-cited papers that are squarely on the topic.',
     'At step 3, stop and wait for my reply before going on to step 4.',
+    'Keep a search log (tool, query, seeds or SQL, filters, retrieved_at, graph_snapshot, counts) and offer it as a methods appendix whose fields map to PRISMA-S and TARCiS.',
+    'If this is for a systematic, scoping or guideline review, say that Inciteful is not a systematic search and recommend searching multiple databases with a librarian or expert searcher.',
   ].filter((line): line is string => line !== null).join('\n');
 }
 
@@ -429,7 +432,7 @@ export function createServerFactory(deps: ToolDeps): McpServerFactory {
   }
 
   return () => {
-    const server = new McpServer({ name: 'inciteful-academic', version: deps.version });
+    const server = new McpServer({ name: 'inciteful-academic', version: deps.version }, { instructions: INSTRUCTIONS });
 
     function register<S extends z.ZodObject>(
       name: ToolName, inputSchema: S,
@@ -684,7 +687,7 @@ export function createServerFactory(deps: ToolDeps): McpServerFactory {
 
     server.registerPrompt('literature_review', {
       title: 'Literature review',
-      description: 'A guided literature review on a topic or around seed papers: find related work, confirm the seeds with you, rank the field, read the abstracts, then write with DOI citations and provenance.',
+      description: 'A guided literature review on a topic or around seed papers: find related work, confirm the seeds with you, rank the field and snowball, check the abstracts and retractions, then write with DOI citations, provenance and a search log.',
       argsSchema: z.object({
         topic: z.string().optional().describe('The research question or topic.'),
         seeds: z.string().optional().describe('Seed papers (DOIs, OpenAlex IDs or PMIDs), separated by commas or new lines.'),
