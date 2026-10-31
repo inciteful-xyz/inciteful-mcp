@@ -5,6 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { AjvJsonSchemaValidator } from '@modelcontextprotocol/client/validators/ajv';
 import { createMcpHandler } from '@modelcontextprotocol/server';
+import { INSTRUCTIONS } from '../src/instructions.js';
 import { createServerFactory, QUERY_EXAMPLES, type ToolSettled } from '../src/tools.js';
 import { createUrls } from '../src/urls.js';
 import { OpenAlexClient, type Work } from '../src/openalex.js';
@@ -15,6 +16,7 @@ import {
 } from '../src/errors.js';
 import { MAX_CONNECTOR_PATHS, MAX_READ_CHARS, METADATA_WAIT_MS, OUTPUT_CAP_BYTES, TOOL_CEILING_MS } from '../src/limits.js';
 import type { BuildCapLike, SeedResolution } from '../src/types.js';
+import { copyRuleHit } from './copyrules.js';
 
 const NOW = new Date('2026-10-30T18:02:11.000Z');
 const BASE = new URL('https://incitefulmed.com/academic/mcp');
@@ -250,6 +252,28 @@ test('descriptions carry the required facts', async () => {
       assert.doesNotMatch(desc, /\bfirst\b(?! step)/i, `${name}: no "first" superlative`);
       assert.doesNotMatch(desc, /not (be )?logged|never logged|no logs/i, `${name}: no logging claim`);
     }
+  });
+});
+
+test('instructions_fit_and_follow_the_copy_rules', () => {
+  // Claude Code cuts instructions at 4,096 characters; ChatGPT weighs the first 512 most.
+  assert.ok(INSTRUCTIONS.length <= 4_096, `${INSTRUCTIONS.length} characters`);
+  assert.match(INSTRUCTIONS.slice(0, 512), /Use it for literature searches, related work, .+ and BibTeX\/RIS export\./);
+  assert.equal(INSTRUCTIONS, INSTRUCTIONS.trim());
+  const hit = copyRuleHit(INSTRUCTIONS);
+  assert.equal(hit, null, `instructions: "${hit}"`);
+  assert.doesNotMatch(INSTRUCTIONS, /\/resources|OpenCitations|Semantic Scholar|PRISMA-compliant|systematic-review-ready/i);
+});
+
+test('initialize_and_discover_return_the_instructions', async () => {
+  // Legacy initialize.
+  await withClient({}, async ({ client }) => {
+    assert.equal(client.getInstructions(), INSTRUCTIONS);
+  }, false);
+  // 2026-07-28: connect probes server/discover.
+  await withClient({}, async ({ client }) => {
+    assert.equal(client.getDiscoverResult()?.instructions, INSTRUCTIONS);
+    assert.equal(client.getInstructions(), INSTRUCTIONS);
   });
 });
 

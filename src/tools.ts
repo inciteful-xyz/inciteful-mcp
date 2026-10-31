@@ -9,6 +9,7 @@ import {
   BuildDeadlineError, GraphError, GraphUnavailableError, OpenAlexBudgetExhausted, OpenAlexError, OpenAlexRateLimited, QueryTimeoutError, TitleFilterError,
 } from './errors.js';
 import type { ConnectorPaper, GraphClient, SimilarPaper } from './graph.js';
+import { INSTRUCTIONS } from './instructions.js';
 import {
   DEFAULT_SQL_LIMIT, MAX_ANALYSIS_LIMIT, MAX_CONNECTOR_PATHS, MAX_ID_CHARS, MAX_PAPER_IDS, MAX_QUERY_CHARS, MAX_READ_CHARS, MAX_SEARCH_LIMIT, MAX_SEEDS, MAX_SQL_CHARS, MAX_SQL_LIMIT, MIN_SQL_LIMIT,
   METADATA_WAIT_MS, TOOL_CEILING_MS, URL_SEED_CAP, type ToolName,
@@ -428,7 +429,7 @@ export function createServerFactory(deps: ToolDeps): McpServerFactory {
   }
 
   return () => {
-    const server = new McpServer({ name: 'inciteful-academic', version: deps.version });
+    const server = new McpServer({ name: 'inciteful-academic', version: deps.version }, { instructions: INSTRUCTIONS });
 
     function register<S extends z.ZodObject>(
       name: ToolName, inputSchema: S,
