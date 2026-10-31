@@ -1,4 +1,4 @@
-// Entry point: config, clients, usage log, MCP handler, HTTP server on 0.0.0.0:8080, SIGTERM/SIGINT drain.
+// Entry point: SIGTERM/SIGINT drain, config, clients, usage log, MCP handler, HTTP server on 0.0.0.0:8080.
 // Output is startup lines and fixed warnings only; nothing here prints request data or config values.
 
 import { readFileSync } from 'node:fs';
@@ -8,7 +8,7 @@ import { createMcpHandler } from '@modelcontextprotocol/server';
 import { loadConfig, type Config } from './config.js';
 import { ContentClient } from './content.js';
 import { GraphClient } from './graph.js';
-import { createApp, recordToolCalls, shutdown, trackInFlight } from './http.js';
+import { createApp, recordToolCalls, shutdown, trackInFlight, type Stoppable } from './http.js';
 import { BUILD_CAP, BuildCap, RATE_LIMIT_PER_MINUTE, RateLimiter, VENDOR_RANGES, VENDOR_RATE_LIMIT_PER_MINUTE } from './limits.js';
 import { OpenAlexClient } from './openalex.js';
 import { pages } from './pages/index.js';
@@ -21,6 +21,20 @@ const PORT = 8080;
 const DRAIN_TIMEOUT_MS = 90_000;
 const VERSION = (JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }).version;
 const ASSETS_DIR = fileURLToPath(new URL('../assets/', import.meta.url));
+
+// SIGTERM from Kubernetes and docker stop; SIGINT for Ctrl-C in a local `docker run -it` (as PID 1,
+// node has no default action for either). Registered before any startup work; until the server
+// exists, a signal just exits.
+let stoppable: Stoppable | null = null;
+let stopping = false;
+const onStop = (signal: NodeJS.Signals) => {
+  if (stopping) return;
+  stopping = true;
+  console.log(`${signal}: draining`);
+  void shutdown(stoppable, DRAIN_TIMEOUT_MS, code => process.exit(code));
+};
+process.on('SIGTERM', onStop);
+process.on('SIGINT', onStop);
 
 let config: Config;
 try {
@@ -53,27 +67,14 @@ const factory = createServerFactory({
 });
 const handler = createMcpHandler(factory, { responseMode: 'sse', keepAliveMs: 15_000 });
 
-// One resolve so the pages have a graph snapshot date; a failure only leaves it blank.
-await graph.resolve([]).catch(() => {});
-
 const tracked = trackInFlight(createApp({
   config, mcp: handler, pages, graphMeta: () => graph.lastMeta, limiter, usage, assetsDir: ASSETS_DIR,
 }));
 const server = createServer(tracked.listener);
+stoppable = { server, tracked, close: async () => { await handler.close().catch(() => {}); usage.close(); } };
 server.listen(PORT, HOST, () => {
   console.log(`inciteful-mcp ${VERSION} listening on ${HOST}:${PORT}`);
+  // Only fills the pages' snapshot date (a tool call fills it too), so it never delays listening,
+  // and a failure only leaves the date blank until then.
+  void graph.resolve([]).catch(() => {});
 });
-
-// SIGTERM from Kubernetes and docker stop; SIGINT for Ctrl-C in a local `docker run -it` (as PID 1,
-// node has no default action for either).
-let stopping = false;
-const onStop = (signal: NodeJS.Signals) => {
-  if (stopping) return;
-  stopping = true;
-  console.log(`${signal}: draining`);
-  void shutdown({
-    server, tracked, close: async () => { await handler.close().catch(() => {}); usage.close(); },
-  }, DRAIN_TIMEOUT_MS, code => process.exit(code));
-};
-process.on('SIGTERM', onStop);
-process.on('SIGINT', onStop);
