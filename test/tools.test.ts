@@ -13,7 +13,7 @@ import type { ConnectorResult, GraphClient, SimilarPaper } from '../src/graph.js
 import {
   BuildDeadlineError, GraphError, GraphUnavailableError, OpenAlexBudgetExhausted, OpenAlexRateLimited, QueryTimeoutError,
 } from '../src/errors.js';
-import { MAX_CONNECTOR_PATHS, MAX_READ_CHARS, OUTPUT_CAP_BYTES } from '../src/limits.js';
+import { MAX_CONNECTOR_PATHS, MAX_READ_CHARS, METADATA_WAIT_MS, OUTPUT_CAP_BYTES, TOOL_CEILING_MS } from '../src/limits.js';
 import type { BuildCapLike, SeedResolution } from '../src/types.js';
 
 const NOW = new Date('2026-10-30T18:02:11.000Z');
@@ -651,8 +651,9 @@ test('build cap keys and deadline', async () => {
       ['query', ['W1', 'W2'], 'SELECT 1', 9], ['metadata', ['W1', 'W2']],
       ['connector', 'W1', 'W2', false],
     ]);
-    // On a still clock: builds get now + 90 s; metadata waits min(deadline, now + 5 s).
-    assert.deepEqual(calls.cap.map(c => c.deadlineAt - NOW.getTime()), [90_000, 90_000, 90_000, 5_000, 90_000, 5_000, 90_000]);
+    // On a still clock: builds get now + the ceiling; metadata waits min(deadline, now + 5 s).
+    const [C, M] = [TOOL_CEILING_MS, METADATA_WAIT_MS];
+    assert.deepEqual(calls.cap.map(c => c.deadlineAt - NOW.getTime()), [C, C, C, M, C, M, C]);
   });
 });
 
@@ -664,13 +665,13 @@ test('deadline_computed_once_per_call', async () => {
     await call('query_citation_graph', { seeds: ['W1'], sql: 'SELECT 1' });
     const [build, metadata] = calls.cap.map(c => c.deadlineAt);
     // The first read of the call (reads = 0) plus the ceiling.
-    assert.equal(build, NOW.getTime() + 90_000);
+    assert.equal(build, NOW.getTime() + TOOL_CEILING_MS);
     // Metadata: a later read plus 5 s, still under the call's deadline.
     assert.ok(metadata < build && (metadata - NOW.getTime() - 5_000) % 1000 === 0);
     reads = 0;
     calls.cap.length = 0;
     await call('explore_citation_network', { seeds: ['W1'], analysis: 'important' });
-    assert.equal(calls.cap[0].deadlineAt, NOW.getTime() + 90_000);
+    assert.equal(calls.cap[0].deadlineAt, NOW.getTime() + TOOL_CEILING_MS);
   });
 });
 
@@ -928,7 +929,7 @@ test('ceiling_aborts_a_hung_resolve', async () => {
     await withClient({ resolve: (_inputs, signal) => { seen = signal; reached(); return new Promise(() => {}); } }, async ({ call, settled }) => {
       const pending = call('find_similar_papers', { seeds: ['W1'] });
       await started;
-      mock.timers.tick(89_999);
+      mock.timers.tick(TOOL_CEILING_MS - 1);
       await settle();
       assert.equal(seen?.aborted, false, 'not aborted before the ceiling');
       mock.timers.tick(1);
@@ -957,7 +958,7 @@ test('a_build_past_the_deadline_times_out_and_keeps_running', async () => {
     await withClient({ cap, similar: () => { reached(); return new Promise(() => {}); } }, async ({ call, calls, settled }) => {
       const pending = call('find_similar_papers', { seeds: ['W1'] });
       await started;
-      mock.timers.tick(90_000);
+      mock.timers.tick(TOOL_CEILING_MS);
       const r = await pending;
       assert.equal(text(r), 'Still working upstream; retry in about a minute.');
       assert.deepEqual(settled.map(e => e.outcome), ['timeout']);
@@ -978,7 +979,7 @@ test('a_late_rejection_after_the_ceiling_is_handled', async () => {
     await withClient({ resolve: () => { reached(); return new Promise((_, reject) => { fail = reject; }); } }, async ({ call }) => {
       const pending = call('find_similar_papers', { seeds: ['W1'] });
       await started;
-      mock.timers.tick(90_000);
+      mock.timers.tick(TOOL_CEILING_MS);
       assert.equal(text(await pending), 'Still working upstream; retry in about a minute.');
       fail(new GraphUnavailableError(null));
       await settle();
@@ -1095,13 +1096,13 @@ test('id_length_bounded', async () => {
 });
 
 test('metadata_deadline_never_exceeds_the_call_deadline', async () => {
-  // The clock jumps to NOW + 88 s once the query has run, so now + 5 s would pass the call's deadline.
+  // The clock jumps to 2 s before the ceiling once the query has run, so now + 5 s would pass the call's deadline.
   let late = false;
-  const now = () => new Date(NOW.getTime() + (late ? 88_000 : 0));
+  const now = () => new Date(NOW.getTime() + (late ? TOOL_CEILING_MS - 2_000 : 0));
   const query = async () => { late = true; return [{ paper_id: 'W9' }]; };
   await withClient({ now, query }, async ({ call, calls }) => {
     await call('explore_citation_network', { seeds: ['W1'], analysis: 'important' });
     const metadata = calls.cap.find(c => JSON.parse(c.key)[0] === 'metadata')!;
-    assert.equal(metadata.deadlineAt, NOW.getTime() + 90_000);
+    assert.equal(metadata.deadlineAt, NOW.getTime() + TOOL_CEILING_MS);
   });
 });

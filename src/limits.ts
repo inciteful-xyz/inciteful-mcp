@@ -13,8 +13,12 @@ export const TOOL_NAMES = [
 ] as const;
 export type ToolName = (typeof TOOL_NAMES)[number];
 
-/** Ceiling on one tool call. The graph call behind a timed-out tool call keeps running upstream. */
-export const TOOL_CEILING_MS = 90_000;
+/**
+ * Ceiling on one tool call, under the SDK clients' 60 s default request timeout, so the client gets
+ * the retry message rather than its own timeout. The graph call behind a timed-out tool call keeps
+ * running upstream.
+ */
+export const TOOL_CEILING_MS = 55_000;
 /** Longest wait for a graph's `metadata` after its query; the stats are dropped when it runs out. */
 export const METADATA_WAIT_MS = 5_000;
 /** Graph builds in flight at once. A build is any call to `/query`, `/paper/similar` or `/connector`. */
