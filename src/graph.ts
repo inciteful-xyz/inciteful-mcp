@@ -103,7 +103,9 @@ export class GraphClient {
       }
     }
     const meta: GraphMeta = { snapshot: header(res, 'x-graph-snapshot'), recentTier: header(res, 'x-graph-recent-tier') };
-    this.lastMeta = meta;
+    // The pages show lastMeta. A response without the snapshot header (an error page, a proxy reply)
+    // says nothing about the graph, so it leaves the last known values in place.
+    if (meta.snapshot !== null) this.lastMeta = meta;
     if (res.ok) return { res, meta };
     if (res.status === 503) {
       await res.body?.cancel();

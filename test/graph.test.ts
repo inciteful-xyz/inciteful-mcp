@@ -172,6 +172,8 @@ test('reads_snapshot_and_recent_headers_and_updates_lastMeta', async () => {
     () => json([], { 'X-Graph-Snapshot': '2026-10-15', 'X-Graph-Recent-Tier': '2026-10-29' }),
     () => json([], { 'X-Graph-Snapshot': '2026-11-01', 'X-Graph-Recent-Tier': '' }),
     () => new Response('down', { status: 503, headers: { 'X-Graph-Snapshot': '2026-11-02' } }),
+    () => json([], { 'X-Graph-Recent-Tier': '2026-11-03' }),
+    () => new Response('bad gateway', { status: 502 }),
   ];
   const { fetcher } = fake((_call, index) => responses[index]());
   const graph = new GraphClient(cfg, fetcher);
@@ -188,6 +190,13 @@ test('reads_snapshot_and_recent_headers_and_updates_lastMeta', async () => {
   assert.deepEqual(graph.lastMeta, { snapshot: '2026-11-01', recentTier: null });
 
   await assert.rejects(graph.resolve(['W1']), GraphUnavailableError);
+  assert.deepEqual(graph.lastMeta, { snapshot: '2026-11-02', recentTier: null });
+
+  // Responses without a snapshot header leave the last known values in place.
+  const fourth = await graph.resolve(['W1']);
+  assert.equal(fourth.snapshot, null);
+  assert.deepEqual(graph.lastMeta, { snapshot: '2026-11-02', recentTier: null });
+  await assert.rejects(graph.resolve(['W1']));
   assert.deepEqual(graph.lastMeta, { snapshot: '2026-11-02', recentTier: null });
 });
 
