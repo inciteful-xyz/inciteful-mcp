@@ -11,12 +11,12 @@ import {
 } from './errors.js';
 import type { ConnectorPaper, GraphClient, SimilarPaper } from './graph.js';
 import {
-  GRACE_MS, MAX_ANALYSIS_LIMIT, MAX_ID_CHARS, MAX_PAPER_IDS, MAX_QUERY_CHARS, MAX_READ_CHARS, MAX_SEARCH_LIMIT, MAX_SEEDS, MAX_SQL_CHARS, MAX_SQL_LIMIT,
+  DEFAULT_SQL_LIMIT, GRACE_MS, MAX_ANALYSIS_LIMIT, MAX_ID_CHARS, MAX_PAPER_IDS, MAX_QUERY_CHARS, MAX_READ_CHARS, MAX_SEARCH_LIMIT, MAX_SEEDS, MAX_SQL_CHARS, MAX_SQL_LIMIT,
   METADATA_WAIT_MS, OUTPUT_CAP_BYTES, TOOL_CEILING_MS, URL_SEED_CAP, type ToolName,
 } from './limits.js';
 import { countOpenAlexRequests, type OpenAlexClient, type Work } from './openalex.js';
 import { capResult } from './output.js';
-import { ALWAYS_ADVISORY, buildProvenance, type ProvenanceInput } from './provenance.js';
+import { ALWAYS_ADVISORY, buildProvenance, trailingLimit, type ProvenanceInput } from './provenance.js';
 import { analysisSql, methodFor, type Analysis } from './templates.js';
 import { buildTitleMatch, MAX_TERMS } from './titlefilter.js';
 import type { BuildCapLike, GraphMeta, SeedResolution } from './types.js';
@@ -236,7 +236,7 @@ const DESCRIPTIONS: Record<ToolName, string> = {
   query_citation_graph: [
     `Run your own read-only SQLite query on the citation graph Inciteful builds around 1–${MAX_SEEDS} seed papers (depth 2, the same graph as explore_citation_network).`,
     'Use it when the fixed analyses in explore_citation_network do not answer the question.',
-    `Rules: a single SELECT statement. graph-api applies limit (at most ${MAX_SQL_LIMIT}) in place of any LIMIT in the SQL.`,
+    `Rules: a single SELECT statement. Rows returned: the limit argument if given, else the query's trailing LIMIT, else ${DEFAULT_SQL_LIMIT}; at most ${MAX_SQL_LIMIT}.`,
     'OFFSET (and LIMIT a, b) is rejected before sending; page with a narrower WHERE or an ORDER BY instead.',
     '\n\nSchema:',
     '\n- papers(paper_id TEXT: OpenAlex ID such as W2919115771; doi TEXT without the https://doi.org/ prefix; authors TEXT: JSON array of {author_id, name, sequence, position, institution {id, name, ror}};',
@@ -557,7 +557,7 @@ export function createServerFactory(deps: ToolDeps): McpServerFactory {
       const graphMeta = await graphMetadata(r.ids, call);
       return {
         analysis: a.analysis, rows: rows.map(templateRow),
-        ...provenanceFor('explore_citation_network', r, meta, { method, filters, requestedDepth: 2, graphMeta, sqlExecuted: sql, effectiveLimit: a.limit }, link),
+        ...provenanceFor('explore_citation_network', r, meta, { method, filters, requestedDepth: 2, graphMeta, sql, effectiveLimit: a.limit }, link),
       };
     });
 
@@ -603,12 +603,16 @@ export function createServerFactory(deps: ToolDeps): McpServerFactory {
     register('query_citation_graph', z.object({
       seeds,
       sql: z.string().trim().min(1).max(MAX_SQL_CHARS).describe('A single SQLite SELECT statement.'),
-      limit: limit(MAX_SQL_LIMIT, 100),
+      limit: z.number().int().min(1).max(MAX_SQL_LIMIT).optional()
+        .describe(`Rows to return, at most ${MAX_SQL_LIMIT}. Default: the query's trailing LIMIT (capped at ${MAX_SQL_LIMIT}), else ${DEFAULT_SQL_LIMIT}.`),
     }), async (a, call) => {
       // Before any call. No quote-awareness: a false positive just asks for a rewrite.
       if (/\boffset\b/i.test(a.sql) || /\blimit\s+\d+\s*,/i.test(a.sql)) {
         throw new ToolFailure("OFFSET isn't supported; use a narrower WHERE or ORDER BY");
       }
+      // graph-api replaces the query's LIMIT with this one, so a LIMIT the caller wrote is kept unless overridden.
+      const queryLimit = trailingLimit(a.sql);
+      const effectiveLimit = a.limit ?? (queryLimit === undefined ? DEFAULT_SQL_LIMIT : Math.min(queryLimit, MAX_SQL_LIMIT));
       const r = await resolveSeeds(a.seeds, call);
       const multiple = r.ids.length > 1;
       const link = r.ids.length ? urls.sqlUrl(r.inputOrder, a.sql) : null;
@@ -616,7 +620,7 @@ export function createServerFactory(deps: ToolDeps): McpServerFactory {
       if (!r.ids.length) return { rows: [], ...provenanceFor('query_citation_graph', r, r.meta, { method, filters: {} }, link) };
       let answer: Awaited<ReturnType<GraphClient['query']>>;
       try {
-        answer = await buildCap.run(capKey('query', r.ids, a.sql, a.limit), () => graph.query(r.ids, a.sql, a.limit), call.deadlineAt);
+        answer = await buildCap.run(capKey('query', r.ids, a.sql, effectiveLimit), () => graph.query(r.ids, a.sql, effectiveLimit), call.deadlineAt);
       } catch (err) {
         // A 400 here is graph-api's error about the caller's own SQL, which they need to fix it.
         if (err instanceof GraphError && err.status === 400) {
@@ -628,7 +632,7 @@ export function createServerFactory(deps: ToolDeps): McpServerFactory {
       const graphMeta = await graphMetadata(r.ids, call);
       return {
         rows,
-        ...provenanceFor('query_citation_graph', r, meta, { method, filters: {}, requestedDepth: 2, graphMeta, sqlExecuted: a.sql, effectiveLimit: a.limit }, link),
+        ...provenanceFor('query_citation_graph', r, meta, { method, filters: {}, requestedDepth: 2, graphMeta, sql: a.sql, effectiveLimit }, link),
       };
     });
 

@@ -5,6 +5,23 @@ export const ALWAYS_ADVISORY = 'Retraction and preprint flags: use get_papers.';
 const TITLE_FILTER_KEYS = ['title_all', 'title_any', 'title_none'];
 /** Unresolved seeds listed one advisory each, up to this many. */
 const MAX_SEED_ADVISORIES = 10;
+/** A trailing top-level LIMIT n. One inside a subquery or CTE is followed by `)` and never matches. */
+const TRAILING_LIMIT = /\blimit\s+(\d+)\s*;?\s*$/i;
+
+/** The query's trailing top-level LIMIT, if it has one. */
+export function trailingLimit(sql: string): number | undefined {
+  const n = sql.trim().match(TRAILING_LIMIT)?.[1];
+  return n === undefined ? undefined : Number(n);
+}
+
+/**
+ * The SQL as graph-api runs it: graph-api replaces the query's top-level LIMIT with `limit`, or adds
+ * one. (It re-serializes the parsed query, so its spacing can differ; the LIMIT is the same.)
+ */
+export function withLimit(sql: string, limit: number): string {
+  const s = sql.trim();
+  return TRAILING_LIMIT.test(s) ? s.replace(TRAILING_LIMIT, `LIMIT ${limit}`) : `${s.replace(/\s*;$/, '')} LIMIT ${limit}`;
+}
 
 export type ProvenanceInput = {
   now: Date;
@@ -17,7 +34,8 @@ export type ProvenanceInput = {
   graphMeta?: Record<string, string>;
   method: string;
   filters: object;
-  sqlExecuted?: string;
+  /** The SQL sent to graph-api; reported with the LIMIT graph-api applies, `effectiveLimit`. */
+  sql?: string;
   effectiveLimit?: number;
   fastPath?: 'similar' | 'connector';
   connector?: { papersSearched: number; hops: number[] };
@@ -85,11 +103,12 @@ export function buildProvenance(input: ProvenanceInput): { provenance: object; d
   if (TITLE_FILTER_KEYS.some(k => Array.isArray(filters[k]) && (filters[k] as unknown[]).length > 0)) {
     advisories.push('A title filter is in use: it matches paper titles only (not abstracts or full text), with Porter stemming, so relevant papers worded differently are left out.');
   }
-  if (input.sqlExecuted !== undefined && input.effectiveLimit !== undefined) {
-    // Only a trailing top-level LIMIT; one inside a subquery or CTE is never read.
-    const userLimit = input.sqlExecuted.trim().match(/\blimit\s+(\d+)\s*;?\s*$/i)?.[1];
-    if (userLimit !== undefined && Number(userLimit) !== input.effectiveLimit) {
-      advisories.push(`graph-api applies LIMIT ${input.effectiveLimit} in place of the query's LIMIT.`);
+  let sqlExecuted: string | null = null;
+  if (input.sql !== undefined && input.effectiveLimit !== undefined) {
+    sqlExecuted = withLimit(input.sql, input.effectiveLimit);
+    const queryLimit = trailingLimit(input.sql);
+    if (queryLimit !== undefined && queryLimit !== input.effectiveLimit) {
+      advisories.push(`graph-api applies LIMIT ${input.effectiveLimit} in place of the query's LIMIT ${queryLimit}.`);
     }
   }
   advisories.push(ALWAYS_ADVISORY);
@@ -106,7 +125,7 @@ export function buildProvenance(input: ProvenanceInput): { provenance: object; d
     graph,
     method: input.method,
     filters: input.filters,
-    sql_executed: input.sqlExecuted ?? null,
+    sql_executed: sqlExecuted,
     effective_limit: input.effectiveLimit ?? null,
   };
   if (input.connector) {

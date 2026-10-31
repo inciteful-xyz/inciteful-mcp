@@ -31,7 +31,7 @@ test('baseline: only the always-on advisory', () => {
 });
 
 test('full provenance block from graph metadata', () => {
-  const p = prov({ filters: { title_all: ['vagal'], year_from: null }, sqlExecuted: 'SELECT 1 LIMIT 25', effectiveLimit: 25 });
+  const p = prov({ filters: { title_all: ['vagal'], year_from: null }, sql: 'SELECT 1 LIMIT 25', effectiveLimit: 25 });
   assert.deepEqual(p, {
     retrieved_at: '2026-10-30T18:02:11Z',
     tool: 'explore_citation_network', server_version: '1.0.0',
@@ -103,21 +103,34 @@ test('advisory_title_filter', () => {
 });
 
 test('advisory_user_limit_replaced', () => {
-  const a = advisories({ sqlExecuted: 'SELECT * FROM papers LIMIT 1000', effectiveLimit: 500 });
-  assert.deepEqual(a, ["graph-api applies LIMIT 500 in place of the query's LIMIT.", ALWAYS]);
-  assert.deepEqual(advisories({ sqlExecuted: 'SELECT * FROM papers limit 500', effectiveLimit: 500 }), [ALWAYS]);
-  assert.deepEqual(advisories({ sqlExecuted: 'SELECT * FROM papers', effectiveLimit: 500 }), [ALWAYS]);
+  const a = advisories({ sql: 'SELECT * FROM papers LIMIT 1000', effectiveLimit: 500 });
+  assert.deepEqual(a, ["graph-api applies LIMIT 500 in place of the query's LIMIT 1000.", ALWAYS]);
+  assert.deepEqual(advisories({ sql: 'SELECT * FROM papers limit 500', effectiveLimit: 500 }), [ALWAYS]);
+  assert.deepEqual(advisories({ sql: 'SELECT * FROM papers', effectiveLimit: 500 }), [ALWAYS]);
   // Only a trailing top-level LIMIT counts; one inside a subquery or CTE never does.
-  assert.equal(advisories({ sqlExecuted: 'SELECT * FROM (SELECT * FROM papers LIMIT 5) LIMIT 20', effectiveLimit: 20 }).length, 1);
+  assert.equal(advisories({ sql: 'SELECT * FROM (SELECT * FROM papers LIMIT 5) LIMIT 20', effectiveLimit: 20 }).length, 1);
   assert.deepEqual(advisories({
-    sqlExecuted: 'WITH top AS (SELECT * FROM papers ORDER BY page_rank DESC LIMIT 50) SELECT * FROM top ORDER BY title',
+    sql: 'WITH top AS (SELECT * FROM papers ORDER BY page_rank DESC LIMIT 50) SELECT * FROM top ORDER BY title',
     effectiveLimit: 5,
   }), [ALWAYS]);
-  assert.deepEqual(advisories({ sqlExecuted: 'SELECT * FROM (SELECT * FROM papers LIMIT 3)', effectiveLimit: 5 }), [ALWAYS]);
+  assert.deepEqual(advisories({ sql: 'SELECT * FROM (SELECT * FROM papers LIMIT 3)', effectiveLimit: 5 }), [ALWAYS]);
   assert.deepEqual(advisories({
-    sqlExecuted: 'WITH top AS (SELECT * FROM papers LIMIT 50) SELECT * FROM top LIMIT 7', effectiveLimit: 5,
-  }), ["graph-api applies LIMIT 5 in place of the query's LIMIT.", ALWAYS]);
-  assert.deepEqual(advisories({ sqlExecuted: '  SELECT * FROM papers\n LIMIT 7 ;\n', effectiveLimit: 5 }).length, 2);
+    sql: 'WITH top AS (SELECT * FROM papers LIMIT 50) SELECT * FROM top LIMIT 7', effectiveLimit: 5,
+  }), ["graph-api applies LIMIT 5 in place of the query's LIMIT 7.", ALWAYS]);
+  assert.deepEqual(advisories({ sql: '  SELECT * FROM papers\n LIMIT 7 ;\n', effectiveLimit: 5 }).length, 2);
+});
+
+test('sql_executed_carries_the_applied_limit', () => {
+  // graph-api replaces the top-level LIMIT, or adds one; a semicolon doesn't survive its parser.
+  const cases: Array<[string, number, string]> = [
+    ['SELECT * FROM papers LIMIT 1000', 500, 'SELECT * FROM papers LIMIT 500'],
+    ['SELECT * FROM papers limit 5', 5, 'SELECT * FROM papers LIMIT 5'],
+    ['  SELECT * FROM papers\n LIMIT 7 ;\n', 5, 'SELECT * FROM papers\n LIMIT 5'],
+    ['SELECT * FROM papers', 100, 'SELECT * FROM papers LIMIT 100'],
+    ['SELECT * FROM papers ;', 100, 'SELECT * FROM papers LIMIT 100'],
+    ['SELECT * FROM (SELECT * FROM papers LIMIT 3)', 100, 'SELECT * FROM (SELECT * FROM papers LIMIT 3) LIMIT 100'],
+  ];
+  for (const [sql, effectiveLimit, executed] of cases) assert.equal(prov({ sql, effectiveLimit }).sql_executed, executed, sql);
 });
 
 test('nulls_not_zero_when_meta_missing', () => {

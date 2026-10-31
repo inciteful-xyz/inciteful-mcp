@@ -235,7 +235,7 @@ test('descriptions carry the required facts', async () => {
     assert.match(d.find_similar_papers, /default first step/);
     const q = d.query_citation_graph;
     for (const fact of ['title_search(paper_id, search_text)', 'no edge table', 'in-graph', 'W0', 'cocite is NULL',
-      'distance 0', 'ror.organizations', 'title_terms', 'metadata', 'OFFSET', 'single SELECT']) {
+      'distance 0', 'ror.organizations', 'title_terms', 'metadata', 'OFFSET', 'single SELECT', "the query's trailing LIMIT"]) {
       assert.ok(q.includes(fact), `query_citation_graph mentions ${fact}`);
     }
     assert.equal(QUERY_EXAMPLES.length, 3);
@@ -540,13 +540,45 @@ test('query_offset_cases', async () => {
     assert.ok(!ok.isError);
     assert.deepEqual(calls.query[0], { ids: ['W1', 'W2'], sql: 'SELECT paper_id FROM papers LIMIT 10', limit: 40 });
     const sc = ok.structuredContent!;
-    assert.equal(sc.provenance.sql_executed, 'SELECT paper_id FROM papers LIMIT 10');
+    // The limit argument wins over the query's LIMIT; provenance shows the LIMIT graph-api runs.
+    assert.equal(sc.provenance.sql_executed, 'SELECT paper_id FROM papers LIMIT 40');
     assert.equal(sc.provenance.effective_limit, 40);
-    assert.ok(sc.diagnostics.advisories.includes('graph-api applies LIMIT 40 in place of the query\'s LIMIT.'));
+    assert.ok(sc.diagnostics.advisories.includes("graph-api applies LIMIT 40 in place of the query's LIMIT 10."));
     assert.equal(sc.inciteful_url, 'https://incitefulmed.com/academic/p/q?ids[]=W1&ids[]=W2&sql=SELECT%20paper_id%20FROM%20papers%20LIMIT%2010');
     // User rows are returned as they are.
     assert.deepEqual(sc.rows[0].authors, JSON.stringify([{ name: 'Ann' }, { name: 'Bo' }, { name: 'Cy' }, { name: 'Di' }]));
   });
+});
+
+test('query_honours_the_sql_limit_without_a_limit_argument', async () => {
+  // [sql, limit sent to graph-api, provenance.sql_executed, LIMIT advisory or null]
+  const cases: Array<[string, number, string, string | null]> = [
+    // The query's own trailing LIMIT, not the default 100.
+    ['SELECT paper_id FROM papers LIMIT 5', 5, 'SELECT paper_id FROM papers LIMIT 5', null],
+    ['select paper_id from papers limit 7 ;', 7, 'select paper_id from papers LIMIT 7', null],
+    // Capped at 500.
+    ['SELECT paper_id FROM papers LIMIT 1000', 500, 'SELECT paper_id FROM papers LIMIT 500', "graph-api applies LIMIT 500 in place of the query's LIMIT 1000."],
+    // No LIMIT: the default, which graph-api adds to the query.
+    ['SELECT paper_id FROM papers', 100, 'SELECT paper_id FROM papers LIMIT 100', null],
+    ['SELECT paper_id FROM papers;', 100, 'SELECT paper_id FROM papers LIMIT 100', null],
+    // A LIMIT inside a subquery or CTE isn't the query's LIMIT.
+    ['SELECT * FROM (SELECT paper_id FROM papers LIMIT 3)', 100, 'SELECT * FROM (SELECT paper_id FROM papers LIMIT 3) LIMIT 100', null],
+    ['WITH t AS (SELECT paper_id FROM papers LIMIT 50) SELECT * FROM t LIMIT 20', 20, 'WITH t AS (SELECT paper_id FROM papers LIMIT 50) SELECT * FROM t LIMIT 20', null],
+  ];
+  for (const [sql, sent, executed, advisory] of cases) {
+    await withClient({}, async ({ call, calls }) => {
+      const r = await call('query_citation_graph', { seeds: ['W1'], sql });
+      assert.ok(!r.isError, sql);
+      assert.equal(calls.query[0].sql, sql, 'graph-api gets the SQL as written');
+      assert.equal(calls.query[0].limit, sent, sql);
+      assert.equal(JSON.parse(calls.cap[0].key)[3], sent, 'the build-cap key carries the applied limit');
+      const sc = r.structuredContent!;
+      assert.equal(sc.provenance.sql_executed, executed);
+      assert.equal(sc.provenance.effective_limit, sent);
+      const limitAdvisories = (sc.diagnostics.advisories as string[]).filter(a => a.startsWith('graph-api applies LIMIT'));
+      assert.deepEqual(limitAdvisories, advisory === null ? [] : [advisory], sql);
+    });
+  }
 });
 
 test('query errors map to tool errors', async () => {

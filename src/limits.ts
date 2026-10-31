@@ -33,6 +33,8 @@ export const MAX_SEEDS = 500;
 export const MAX_SEARCH_LIMIT = 50;
 export const MAX_ANALYSIS_LIMIT = 100;
 export const MAX_SQL_LIMIT = 500;
+/** query_citation_graph's limit when neither the argument nor the query sets one. */
+export const DEFAULT_SQL_LIMIT = 100;
 /** Characters in `query_citation_graph`'s `sql` and `search_literature`'s `query`. */
 export const MAX_SQL_CHARS = 10_000;
 export const MAX_QUERY_CHARS = 1_000;
