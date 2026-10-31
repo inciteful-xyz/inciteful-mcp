@@ -602,7 +602,7 @@ test('query errors map to tool errors', async () => {
   });
   await withClient({ cap: { run: async () => { throw new BuildDeadlineError(); } } }, async ({ call, settled }) => {
     const r = await call('query_citation_graph', { seeds: ['W1'], sql: 'SELECT 1' });
-    assert.equal(text(r), 'The graph is still building; retry in about a minute.');
+    assert.equal(text(r), 'Still working upstream; retry in about a minute.');
     assert.equal(settled[0].outcome, 'timeout');
   });
   await withClient({ resolve: async () => { throw new GraphUnavailableError(30); } }, async ({ call, settled }) => {
@@ -889,7 +889,7 @@ test('prompt_requires_topic_or_seeds', async () => {
 });
 
 // ---------------------------------------------------------------------------------------------
-// The per-call ceiling (TOOL_CEILING_MS + GRACE_MS) and connector trimming
+// The per-call ceiling (TOOL_CEILING_MS) and connector trimming
 
 /** Lets the in-process HTTP exchange and promise chains run (setImmediate isn't mocked). */
 const settle = async (rounds = 20) => { for (let i = 0; i < rounds; i++) await new Promise(r => setImmediate(r)); };
@@ -903,13 +903,13 @@ test('ceiling_aborts_a_hung_resolve', async () => {
     await withClient({ resolve: (_inputs, signal) => { seen = signal; reached(); return new Promise(() => {}); } }, async ({ call, settled }) => {
       const pending = call('find_similar_papers', { seeds: ['W1'] });
       await started;
-      mock.timers.tick(90_000);
+      mock.timers.tick(89_999);
       await settle();
-      assert.equal(seen?.aborted, false, 'not aborted at the ceiling itself: the grace runs first');
-      mock.timers.tick(1_000);
+      assert.equal(seen?.aborted, false, 'not aborted before the ceiling');
+      mock.timers.tick(1);
       const r = await pending;
       assert.ok(r.isError);
-      assert.equal(text(r), 'The request took too long upstream; retry in about a minute.');
+      assert.equal(text(r), 'Still working upstream; retry in about a minute.');
       assert.equal(seen?.aborted, true, 'the hung call saw the abort');
       await settle();
       assert.deepEqual(settled.map(e => e.outcome), ['timeout'], 'settled once');
@@ -917,7 +917,7 @@ test('ceiling_aborts_a_hung_resolve', async () => {
   } finally { mock.timers.reset(); }
 });
 
-test('a_build_past_the_deadline_reports_still_building', async () => {
+test('a_build_past_the_deadline_times_out_and_keeps_running', async () => {
   mock.timers.enable({ apis: ['setTimeout'] });
   try {
     // Like BuildCap: rejects at the deadline but leaves fn running (it never settles here).
@@ -933,10 +933,8 @@ test('a_build_past_the_deadline_reports_still_building', async () => {
       const pending = call('find_similar_papers', { seeds: ['W1'] });
       await started;
       mock.timers.tick(90_000);
-      await settle();
-      mock.timers.tick(1_000);
       const r = await pending;
-      assert.equal(text(r), 'The graph is still building; retry in about a minute.');
+      assert.equal(text(r), 'Still working upstream; retry in about a minute.');
       assert.deepEqual(settled.map(e => e.outcome), ['timeout']);
       assert.deepEqual(calls.buildExtra, [], 'the build never received a signal');
     });
@@ -955,8 +953,8 @@ test('a_late_rejection_after_the_ceiling_is_handled', async () => {
     await withClient({ resolve: () => { reached(); return new Promise((_, reject) => { fail = reject; }); } }, async ({ call }) => {
       const pending = call('find_similar_papers', { seeds: ['W1'] });
       await started;
-      mock.timers.tick(91_000);
-      assert.equal(text(await pending), 'The request took too long upstream; retry in about a minute.');
+      mock.timers.tick(90_000);
+      assert.equal(text(await pending), 'Still working upstream; retry in about a minute.');
       fail(new GraphUnavailableError(null));
       await settle();
     });

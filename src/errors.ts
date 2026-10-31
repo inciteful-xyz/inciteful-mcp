@@ -41,12 +41,6 @@ export class BuildDeadlineError extends Error {
   constructor() { super('The citation graph is still building.'); }
 }
 
-/** The abort reason when a whole tool call passes its ceiling (`TOOL_CEILING_MS` plus a grace period). */
-export class ToolDeadlineError extends Error {
-  override readonly name = 'ToolDeadlineError';
-  constructor() { super('The tool call passed its time limit.'); }
-}
-
 /** Invalid title filter. The message is written by our own validator and is shown to the client. */
 export class TitleFilterError extends Error {
   override readonly name = 'TitleFilterError';

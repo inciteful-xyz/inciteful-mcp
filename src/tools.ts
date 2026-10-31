@@ -7,11 +7,10 @@ import { bibtexEntries, risEntries } from './citations.js';
 import type { ContentClient, ContentLink } from './content.js';
 import {
   BuildDeadlineError, GraphError, GraphUnavailableError, OpenAlexBudgetExhausted, OpenAlexError, QueryTimeoutError, TitleFilterError,
-  ToolDeadlineError,
 } from './errors.js';
 import type { ConnectorPaper, GraphClient, SimilarPaper } from './graph.js';
 import {
-  DEFAULT_SQL_LIMIT, GRACE_MS, MAX_ANALYSIS_LIMIT, MAX_CONNECTOR_PATHS, MAX_ID_CHARS, MAX_PAPER_IDS, MAX_QUERY_CHARS, MAX_READ_CHARS, MAX_SEARCH_LIMIT, MAX_SEEDS, MAX_SQL_CHARS, MAX_SQL_LIMIT, MIN_SQL_LIMIT,
+  DEFAULT_SQL_LIMIT, MAX_ANALYSIS_LIMIT, MAX_CONNECTOR_PATHS, MAX_ID_CHARS, MAX_PAPER_IDS, MAX_QUERY_CHARS, MAX_READ_CHARS, MAX_SEARCH_LIMIT, MAX_SEEDS, MAX_SQL_CHARS, MAX_SQL_LIMIT, MIN_SQL_LIMIT,
   METADATA_WAIT_MS, TOOL_CEILING_MS, URL_SEED_CAP, type ToolName,
 } from './limits.js';
 import { countOpenAlexRequests, type OpenAlexClient, type Work } from './openalex.js';
@@ -55,6 +54,9 @@ class ToolFailure extends Error {
   constructor(message: string, readonly outcome: ToolOutcome = 'tool_error') { super(message); }
 }
 
+/** A call past its ceiling, whether a build or other upstream work was still running. */
+const DEADLINE_MESSAGE = 'Still working upstream; retry in about a minute.';
+
 const retryIn = (secs: number | null) => (secs === null ? 'retry shortly' : `retry in about ${secs} seconds`);
 
 /**
@@ -68,7 +70,7 @@ function describeError(err: unknown): { message: string; outcome: ToolOutcome } 
   if (err instanceof QueryTimeoutError) {
     return { message: "The query hit graph-api's time limit; simplify it or add a LIMIT/WHERE.", outcome: 'timeout' };
   }
-  if (err instanceof BuildDeadlineError) return { message: 'The graph is still building; retry in about a minute.', outcome: 'timeout' };
+  if (err instanceof BuildDeadlineError) return { message: DEADLINE_MESSAGE, outcome: 'timeout' };
   if (err instanceof GraphUnavailableError) {
     return { message: `The citation graph service is temporarily unavailable; ${retryIn(err.retryAfterSecs)}.`, outcome: 'upstream_unavailable' };
   }
@@ -324,7 +326,7 @@ function reviewPrompt(topic: string | undefined, seedText: string | undefined): 
 // Factory
 
 /**
- * Per tool call. `signal` aborts at the ceiling plus `GRACE_MS`; it goes to non-build calls only
+ * Per tool call. `signal` aborts at the ceiling (`deadlineAt`); it goes to non-build calls only
  * (resolve, OpenAlex, PMC), never to a graph build, which must be left to finish upstream.
  */
 type Call = { deadlineAt: number; signal: AbortSignal; graphPapers: number | null; graphDepth: number | null };
@@ -421,9 +423,9 @@ export function createServerFactory(deps: ToolDeps): McpServerFactory {
         const ac = new AbortController();
         const call: Call = { deadlineAt, signal: ac.signal, graphPapers: null, graphDepth: null };
         const counter = { calls: 0 };
-        // The ceiling for the whole call. A build reaching the deadline reports "still building" through
-        // the build cap first; the grace keeps this timer from racing it.
-        const timer = setTimeout(() => ac.abort(new ToolDeadlineError()), Math.max(0, deadlineAt - deps.now().getTime()) + GRACE_MS);
+        // The ceiling for the whole call. A build still running then is left to finish upstream (the
+        // build cap holds its slot), so a retry attaches to it.
+        const timer = setTimeout(() => ac.abort(), Math.max(0, deadlineAt - deps.now().getTime()));
         let result: CallToolResult;
         let outcome: ToolOutcome;
         try {
@@ -437,9 +439,7 @@ export function createServerFactory(deps: ToolDeps): McpServerFactory {
           result = { content: [{ type: 'text', text: JSON.stringify(value) }], structuredContent: value };
           outcome = 'ok';
         } catch (err) {
-          const { message, outcome: o } = !(err instanceof BuildDeadlineError) && ac.signal.aborted
-            ? { message: 'The request took too long upstream; retry in about a minute.', outcome: 'timeout' as const }
-            : describeError(err);
+          const { message, outcome: o } = ac.signal.aborted ? { message: DEADLINE_MESSAGE, outcome: 'timeout' as const } : describeError(err);
           result = { content: [{ type: 'text', text: message }], isError: true };
           outcome = o;
         } finally {
