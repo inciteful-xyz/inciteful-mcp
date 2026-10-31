@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { toNodeHandler } from '@modelcontextprotocol/node';
 import type { McpHttpHandler } from '@modelcontextprotocol/server';
 import type { Config } from './config.js';
-import { callerKey, USAGE_CLIENT_MAX_CHARS, type RateLimiter } from './limits.js';
+import { callerKey, type RateLimiter } from './limits.js';
 import { PAGE_CSP } from './pages/index.js';
 import type { ToolSettled } from './tools.js';
 import type { GraphMeta, Pages, UsageSink } from './types.js';
@@ -71,7 +71,7 @@ export const requestContext = new AsyncLocalStorage<RequestContext>();
 
 /**
  * The factory's `onToolSettled`: one usage row per `tools/call`. Client name and version come from
- * the 2026 envelope's client info, else the User-Agent (cut to 100 characters) stands in for the name.
+ * the 2026 envelope's client info, else the User-Agent stands in for the name (the usage log cuts both).
  */
 export function recordToolCalls(usage: UsageSink, now: () => number = Date.now): (e: ToolSettled) => void {
   return (e) => {
@@ -79,7 +79,7 @@ export function recordToolCalls(usage: UsageSink, now: () => number = Date.now):
     if (!ctx) return;
     usage.record({
       tool: e.tool,
-      clientName: e.clientInfo ? e.clientInfo.name : ctx.userAgent?.slice(0, USAGE_CLIENT_MAX_CHARS) ?? null,
+      clientName: e.clientInfo ? e.clientInfo.name : ctx.userAgent,
       clientVersion: e.clientInfo ? e.clientInfo.version : null,
       callerKey: ctx.callerKey,
       durationMs: Math.max(0, now() - ctx.startedAt),
