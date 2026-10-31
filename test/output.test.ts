@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { OUTPUT_CAP_BYTES } from '../src/limits.js';
 import { capResult } from '../src/output.js';
 
 const HINT = 'Output truncated; narrow the request (lower limit, fewer seeds, a title filter).';
@@ -49,13 +50,13 @@ test('a result without diagnostics gets the hint in a new diagnostics block', ()
 });
 
 test('measures_bytes_not_chars', () => {
-  // 30 rows of 1,000 three-byte characters: ~30k chars, ~90k bytes.
+  // 30 rows of 1,000 three-byte characters: ~30k chars, ~90k bytes; a row is ~3k bytes.
   const rows = Array.from({ length: 30 }, () => ({ title: '漢'.repeat(1_000) }));
-  assert.ok(JSON.stringify(result(rows)).length < 60_000);
+  assert.ok(JSON.stringify(result(rows)).length < OUTPUT_CAP_BYTES);
   const out = capResult(result(rows));
   assert.equal(out.truncated, true);
-  assert.ok(bytes(out) <= 60_000);
-  assert.ok(out.rows.length < 30 && out.rows.length >= 19);
+  assert.ok(bytes(out) <= OUTPUT_CAP_BYTES);
+  assert.ok(out.rows.length < 30 && out.rows.length >= Math.floor(OUTPUT_CAP_BYTES / 3_100));
 });
 
 test('an incoming truncated: true is kept', () => {
