@@ -3,8 +3,8 @@
 
 import type { PageCtx } from '../types.js';
 
-/** Swapped for the real address by the launch checklist (spec §8). */
-export const SUPPORT_EMAIL = '{{SUPPORT_EMAIL}}';
+/** Support and privacy contact, shown in the footer and on the privacy and terms pages. */
+export const SUPPORT_EMAIL = 'hello@incitefulmed.com';
 export const GITHUB_URL = 'https://github.com/inciteful-xyz/inciteful-mcp';
 /** The site-wide Organization and WebSite nodes, declared by incitefulmed.com's home page. */
 export const ORGANIZATION_ID = 'https://incitefulmed.com/#organization';

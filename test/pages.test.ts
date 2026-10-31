@@ -150,12 +150,13 @@ test('example_marked_placeholder', () => {
   assert.equal(EXAMPLE.placeholder, true);
 });
 
-test('privacy_lists_recipients_and_placeholder_contact', () => {
+test('privacy_lists_recipients_and_contact', () => {
   const html = pages.privacy(CTX);
   const text = visibleText(html);
   for (const recipient of ['Cloudflare', 'OpenAlex', 'NCBI', 'your assistant’s vendor']) assert.ok(text.toLowerCase().includes(recipient.toLowerCase()), recipient);
   for (const fact of ['90 days', '15 days', 'changes every day', 'Effective date', 'Version']) assert.ok(text.includes(fact), fact);
-  assert.ok(text.includes('{{SUPPORT_EMAIL}}'));
+  assert.ok(text.includes('hello@incitefulmed.com'));
+  assert.ok(html.includes('href="mailto:hello@incitefulmed.com"'));
   const h2 = [...html.matchAll(/<h2\b[^>]*>([\s\S]*?)<\/h2>/g)].map(m => visibleText(m[1]));
   assert.deepEqual(h2, [
     'Summary', 'What we collect', 'What we never collect', 'Who receives data', 'Cookies and analytics',
