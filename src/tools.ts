@@ -216,8 +216,9 @@ export const QUERY_EXAMPLES = [
 
 const DESCRIPTIONS: Record<ToolName, string> = {
   search_literature: [
-    'Search OpenAlex (CC0 metadata) for papers by keywords, ranked by relevance.',
-    'Use it to find candidate seed papers when you have a topic but no DOIs yet, then pass their IDs to find_similar_papers or explore_citation_network.',
+    'A live keyword search of OpenAlex (CC0 metadata), not of the citation graph snapshot. It matches titles, abstracts and full text where OpenAlex has it, ranked by relevance.',
+    'Use it to find candidate seed papers when you have a topic but no DOIs yet, then pass their IDs to find_similar_papers or explore_citation_network;',
+    'it is not a systematic search.',
     'Returns OpenAlex ID, DOI, title, year, venue, global cited_by_count, type, is_retracted and has_abstract; page with next_cursor.',
     `limit is at most ${MAX_SEARCH_LIMIT}. For abstracts and authors use get_papers.`,
   ].join(' '),

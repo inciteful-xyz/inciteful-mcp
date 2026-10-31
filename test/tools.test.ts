@@ -234,6 +234,9 @@ test('descriptions carry the required facts', async () => {
     const { tools } = await client.listTools();
     const d = Object.fromEntries(tools.map(t => [t.name, t.description ?? '']));
     assert.match(d.find_similar_papers, /default first step/);
+    assert.match(d.search_literature, /live keyword search of OpenAlex.*not of the citation graph snapshot/);
+    assert.match(d.search_literature, /titles, abstracts and full text where OpenAlex has it/);
+    assert.match(d.search_literature, /not a systematic search/);
     const q = d.query_citation_graph;
     for (const fact of ['title_search(paper_id, search_text)', 'no edge table', 'in-graph', 'W0', 'cocite is NULL',
       'distance 0', 'ror.organizations', 'title_terms', 'metadata', 'OFFSET', 'single SELECT', "the query's trailing LIMIT"]) {
