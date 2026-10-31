@@ -1,8 +1,8 @@
 // The landing page at /academic/mcp (spec §4.8, layout A): install first, everything else below.
 
-import { readFileSync } from 'node:fs';
 import { coverageNote } from '../provenance.js';
 import type { PageCtx } from '../types.js';
+import { EXAMPLE } from './example.js';
 import { esc, GITHUB_URL, links, ORGANIZATION_ID, shell, WEBSITE_ID, type Links } from './layout.js';
 
 export const LANDING_TITLE = 'Inciteful MCP Server: Citation Graph for AI Assistants';
@@ -13,28 +13,6 @@ const BADGES = ['Free', 'No account', 'OpenAlex metadata (CC0)', 'Open-source se
 
 /** When the client steps below were last checked against each vendor's docs. */
 const STEPS_CHECKED = '2026-10-30';
-
-type Role = 'user' | 'tool' | 'assistant';
-export type Example = { placeholder: boolean; label: string; turns: Array<{ role: Role; text: string }> };
-const ROLES: ReadonlySet<unknown> = new Set<Role>(['user', 'tool', 'assistant']);
-
-/**
- * Checks the example's shape. The launch checklist hand-edits the file, so a bad shape fails the
- * pod at startup rather than turning every landing request into a 500.
- */
-export function parseExample(raw: unknown): Example {
-  const e = raw as Partial<Example> | null;
-  const ok = typeof e === 'object' && e !== null
-    && typeof e.placeholder === 'boolean'
-    && typeof e.label === 'string'
-    && Array.isArray(e.turns) && e.turns.length > 0
-    && e.turns.every(t => typeof t === 'object' && t !== null && ROLES.has(t.role) && typeof t.text === 'string');
-  if (!ok) throw new Error('assets/example.json: invalid shape');
-  return e as Example;
-}
-
-/** A placeholder until the launch checklist swaps in a real run (spec §4.8). */
-const EXAMPLE = parseExample(JSON.parse(readFileSync(new URL('../../assets/example.json', import.meta.url), 'utf8')));
 
 type Client = { id: string; name: string; steps: (l: Links) => string; source: { url: string; label: string } };
 

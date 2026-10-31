@@ -35,8 +35,7 @@ const CACHE_DAY = 'public, max-age=86400';
 
 /**
  * Served asset names → file in `assetsDir`, its type and its cache policy. Only these names are
- * served, so no request path ever reaches the file system. `example.json` is read by the landing
- * page, not served.
+ * served, so no request path ever reaches the file system.
  */
 export const ASSETS: Readonly<Record<string, { file: string; type: string; cache: string }>> = {
   'favicon.svg': { file: 'favicon.svg', type: 'image/svg+xml', cache: CACHE_DAY },

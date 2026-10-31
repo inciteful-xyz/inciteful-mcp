@@ -1,0 +1,18 @@
+// The example conversation on the landing page. A placeholder until the launch checklist swaps in a
+// real run (spec §4.8): edit the turns and set `placeholder: false`.
+
+export type Example = {
+  placeholder: boolean;
+  label: string;
+  turns: Array<{ role: 'user' | 'tool' | 'assistant'; text: string }>;
+};
+
+export const EXAMPLE: Example = {
+  placeholder: true,
+  label: 'Illustrative example, not a recorded run',
+  turns: [
+    { role: 'user', text: 'I have three papers on deep learning: 10.1038/nature14539, 10.1038/nature16961 and 10.1162/neco.1997.9.8.1735. Using Inciteful, what important work around them am I missing?' },
+    { role: 'tool', text: 'explore_citation_network · 3 seeds · analysis: important' },
+    { role: 'assistant', text: "Ranked by PageRank inside the citation network around your three seeds, the most central papers you don't cite yet are listed below, each with its DOI. The provenance block at the end records the graph snapshot, its size and the method, for your methods section." },
+  ],
+};

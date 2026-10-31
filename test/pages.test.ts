@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { readFileSync } from 'node:fs';
-import { parseExample } from '../src/pages/landing.js';
+import { EXAMPLE } from '../src/pages/example.js';
 import { pages } from '../src/pages/index.js';
 import type { PageCtx } from '../src/types.js';
 import { ALLOWED, allCopy, copyRuleHit, decode, scripts, visibleText } from './copyrules.js';
@@ -147,10 +146,8 @@ test('example_marked_placeholder', () => {
   assert.ok(example, 'example conversation');
   assert.match(example[1], /\bdata-placeholder\b/);
   assert.ok(visibleText(example[2]).includes('explore_citation_network'));
-  // The committed file passes the shape check the server runs at startup; a bad shape throws.
-  const committed = JSON.parse(readFileSync(new URL('../assets/example.json', import.meta.url), 'utf8'));
-  assert.equal(parseExample(committed).placeholder, true);
-  assert.throws(() => parseExample({ ...committed, turns: [{ role: 'narrator', text: 'x' }] }), /assets\/example\.json: invalid shape/);
+  // Until the launch checklist swaps in a real run.
+  assert.equal(EXAMPLE.placeholder, true);
 });
 
 test('privacy_lists_recipients_and_placeholder_contact', () => {

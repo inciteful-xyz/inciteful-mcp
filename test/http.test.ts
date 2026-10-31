@@ -576,9 +576,9 @@ test('pages_send_csp_whose_hash_matches_the_copy_script', async () => {
 test('page_assets_are_allowlisted_and_present', () => {
   const dir = new URL('../assets/', import.meta.url);
   const onDisk = new Set(readdirSync(dir).filter(f => !f.startsWith('.')));
-  // Every allowlisted file exists, and every file but the example (read, not served) is allowlisted.
+  // Every allowlisted file exists, and every file is allowlisted.
   for (const [name, asset] of Object.entries(ASSETS)) assert.ok(existsSync(new URL(asset.file, dir)), name);
-  assert.deepEqual([...onDisk].filter(f => !Object.values(ASSETS).some(a => a.file === f)), ['example.json']);
+  assert.deepEqual([...onDisk].filter(f => !Object.values(ASSETS).some(a => a.file === f)), []);
   // Every asset the pages reference is allowlisted.
   const ctx = { publicBaseUrl: config.publicBaseUrl, snapshot: null, recentTier: null };
   const referenced = new Set<string>();
