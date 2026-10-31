@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import type { IncomingMessage } from 'node:http';
 import { mock, test } from 'node:test';
-import { BuildCap, callerKey, RateLimiter } from '../src/limits.js';
+import { BuildCap, callerKey, RateLimiter, VENDOR_RANGES } from '../src/limits.js';
 
 const req = (remoteAddress: string | undefined, headers: Record<string, string> = {}) =>
   ({ headers, socket: { remoteAddress } }) as unknown as IncomingMessage;
@@ -28,7 +28,10 @@ test('caller_key_rules', () => {
 });
 
 function limiter(t: { now: number }) {
-  return new RateLimiter({ perMinute: 2, vendorPerMinute: 3, vendorRanges: ['160.79.104.0/21'], now: () => t.now });
+  return new RateLimiter({
+    perMinute: 2, vendorPerMinute: 3, now: () => t.now,
+    vendorRanges: { anthropic: ['160.79.104.0/21'], openai: ['104.208.184.192/28', '9.129.0.0/16'] },
+  });
 }
 
 test('vendor_cidr_edges', () => {
@@ -48,6 +51,23 @@ test('vendor_cidr_edges', () => {
   }
   // IPv6 keys never match an IPv4 range.
   assert.equal(l.check('2001:db8:1:2::/64').ok, true);
+});
+
+test('one_bucket_per_vendor_across_its_ranges', () => {
+  const t = { now: 0 };
+  const l = limiter(t);
+  // Two OpenAI ranges share one bucket of 3, apart from Anthropic's.
+  assert.equal(l.check('104.208.184.192').ok, true);
+  assert.equal(l.check('9.129.0.1').ok, true);
+  assert.equal(l.check('104.208.184.207').ok, true);
+  assert.equal(l.check('9.129.255.255').ok, false);
+  assert.equal(l.check('160.79.104.1').ok, true);
+});
+
+test('shipped_vendor_ranges_are_labelled_by_vendor', () => {
+  assert.deepEqual(Object.keys(VENDOR_RANGES), ['anthropic', 'openai']);
+  assert.deepEqual(VENDOR_RANGES.anthropic, ['160.79.104.0/21']);
+  assert.ok(VENDOR_RANGES.openai.length > 100);
 });
 
 test('bucket_refills', () => {

@@ -52,7 +52,7 @@ export const MAX_CONNECTOR_PATHS = 25;
 /** Seed-set links to the web app carry at most this many ids, to fit URL limits. */
 export const URL_SEED_CAP = 50;
 
-/** Requests per minute per caller key, and per vendor range for keys inside one. */
+/** Requests per minute per caller key, and per vendor (all its ranges together) for keys inside its ranges. */
 export const RATE_LIMIT_PER_MINUTE = 60;
 export const VENDOR_RATE_LIMIT_PER_MINUTE = 600;
 
@@ -96,8 +96,8 @@ export const OPENAI_RANGES: readonly string[] = [
   '9.234.96.192/28', '9.234.97.96/28',
 ];
 
-/** Every vendor range; each range gets its own shared bucket. */
-export const VENDOR_RANGES: readonly string[] = [...ANTHROPIC_RANGES, ...OPENAI_RANGES];
+/** Vendor ranges by vendor; each vendor's ranges share one bucket. */
+export const VENDOR_RANGES: Readonly<Record<string, readonly string[]>> = { anthropic: ANTHROPIC_RANGES, openai: OPENAI_RANGES };
 
 /** Usage rows older than this are purged. */
 export const USAGE_RETENTION_DAYS = 90;
@@ -166,12 +166,12 @@ const ipv4ToInt = (ip: string) => ip.split('.').reduce((n, part) => n * 256 + Nu
 
 type Range = { label: string; base: number; size: number };
 
-function parseRange(cidr: string): Range {
+function parseRange(cidr: string, label: string): Range {
   const [ip, bits] = cidr.split('/');
   const prefix = Number(bits);
   if (isIP(ip) !== 4 || !Number.isInteger(prefix) || prefix < 0 || prefix > 32) throw new Error(`invalid IPv4 CIDR: ${cidr}`);
   const size = 2 ** (32 - prefix);
-  return { label: cidr, base: Math.floor(ipv4ToInt(ip) / size) * size, size };
+  return { label, base: Math.floor(ipv4ToInt(ip) / size) * size, size };
 }
 
 type Bucket = { tokens: number; at: number; capacity: number };
@@ -182,7 +182,7 @@ const BUCKET_SWEEP_EVERY_MS = 1_000;
 
 /**
  * A token bucket per caller key, refilling continuously at `perMinute` per minute up to `perMinute`.
- * Keys inside a vendor range share that range's bucket of `vendorPerMinute`.
+ * Keys inside any of a vendor's ranges share that vendor's bucket of `vendorPerMinute`.
  */
 export class RateLimiter {
   readonly #perMinute: number;
@@ -192,17 +192,17 @@ export class RateLimiter {
   readonly #buckets = new Map<string, Bucket>();
   #lastSweep = -Infinity;
 
-  constructor(opts: { perMinute: number; vendorPerMinute: number; vendorRanges: readonly string[]; now: () => number }) {
+  constructor(opts: { perMinute: number; vendorPerMinute: number; vendorRanges: Readonly<Record<string, readonly string[]>>; now: () => number }) {
     this.#perMinute = opts.perMinute;
     this.#vendorPerMinute = opts.vendorPerMinute;
-    this.#ranges = opts.vendorRanges.map(parseRange);
+    this.#ranges = Object.entries(opts.vendorRanges).flatMap(([vendor, cidrs]) => cidrs.map(cidr => parseRange(cidr, vendor)));
     this.#now = opts.now;
   }
 
   check(key: string): { ok: boolean; retryAfterSecs: number } {
     const now = this.#now();
     const range = isIP(key) === 4 ? this.#rangeOf(ipv4ToInt(key)) : null;
-    const id = range ? `range:${range.label}` : `key:${key}`;
+    const id = range ? `vendor:${range.label}` : `key:${key}`;
     const capacity = range ? this.#vendorPerMinute : this.#perMinute;
     let bucket = this.#buckets.get(id);
     if (!bucket) {
