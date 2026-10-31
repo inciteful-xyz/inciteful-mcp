@@ -4,7 +4,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { readFile } from 'node:fs/promises';
 import type { IncomingMessage, OutgoingHttpHeaders, Server, ServerResponse } from 'node:http';
-import { Server as NetServer } from 'node:net';
+import { Server as NetServer, type Socket } from 'node:net';
 import { join } from 'node:path';
 import { toNodeHandler } from '@modelcontextprotocol/node';
 import type { McpHttpHandler } from '@modelcontextprotocol/server';
@@ -244,6 +244,10 @@ export type Tracked = {
   inFlight: () => number;
   /** Resolves when no request is in flight. */
   idle: () => Promise<void>;
+  /** From now on, every response sends `Connection: close`, so its connection closes after it. */
+  stopKeepAlive: () => void;
+  /** Open connections that have carried a request. */
+  sockets: () => Socket[];
 };
 
 /**
@@ -252,9 +256,17 @@ export type Tracked = {
  */
 export function trackInFlight(listener: (req: IncomingMessage, res: ServerResponse) => void): Tracked {
   const open = new Set<ServerResponse>();
+  const sockets = new Set<Socket>();
+  let keepAlive = true;
   let waiters: Array<() => void> = [];
   return {
     listener: (req, res) => {
+      const socket = req.socket;
+      if (!sockets.has(socket)) {
+        sockets.add(socket);
+        socket.once('close', () => sockets.delete(socket));
+      }
+      if (!keepAlive) res.setHeader('Connection', 'close');
       open.add(res);
       res.once('close', () => {
         open.delete(res);
@@ -268,16 +280,28 @@ export function trackInFlight(listener: (req: IncomingMessage, res: ServerRespon
     },
     inFlight: () => open.size,
     idle: () => (open.size === 0 ? Promise.resolve() : new Promise<void>(resolve => waiters.push(resolve))),
+    stopKeepAlive: () => { keepAlive = false; },
+    sockets: () => [...sockets],
   };
 }
 
 export type Stoppable = { server: Server; tracked: Tracked; close: () => Promise<void> };
 
+const closed = (socket: Socket) => new Promise<void>(resolve => {
+  if (socket.destroyed) resolve();
+  else socket.once('close', () => resolve());
+});
+
 /**
- * SIGTERM/SIGINT: stop accepting connections, wait up to `timeoutMs` for in-flight requests, run
- * `close`, then `exit(0)`, whether the requests finished or not. `null` (startup hasn't built the
- * server yet) exits at once. Open connections are left to the exit: by then every finished response
- * is with the kernel, which still delivers it after the process ends.
+ * SIGTERM/SIGINT: stop accepting connections, wait for in-flight requests, then end every open
+ * connection and wait for it to close, all within `timeoutMs`; then run `close` and `exit(0)`.
+ * At the timeout, the connections still open are destroyed and the process exits anyway. `null`
+ * (startup hasn't built the server yet) exits at once.
+ *
+ * Why wait for the connections: a finished response's bytes are with the kernel, but when the
+ * process (PID 1) exits, the pod's network goes with it, and bytes still queued there are never
+ * sent. `end()` sends FIN after them, and a connection closes only once the peer has read up to the
+ * FIN and closed its side.
  */
 export async function shutdown(s: Stoppable | null, timeoutMs: number, exit: (code: number) => void): Promise<void> {
   if (s) {
@@ -285,11 +309,22 @@ export async function shutdown(s: Stoppable | null, timeoutMs: number, exit: (co
     // and counts as idle a connection whose response has ended with bytes still in Node's write
     // buffer, which are then lost. Safe on a server that isn't listening yet.
     NetServer.prototype.close.call(s.server);
+    s.tracked.stopKeepAlive();
+    // One deadline for both waits.
     let timer: NodeJS.Timeout | undefined;
-    const timedOut = new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), timeoutMs); });
-    const finished = await Promise.race([s.tracked.idle().then(() => true), timedOut]);
+    const timedOut = new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), timeoutMs); });
+    let finished = await Promise.race([s.tracked.idle().then(() => true), timedOut]);
+    if (finished) {
+      const sockets = s.tracked.sockets();
+      // end(), never destroy(): FIN goes out after every byte still buffered.
+      for (const socket of sockets) socket.end();
+      finished = await Promise.race([Promise.all(sockets.map(closed)).then(() => true), timedOut]);
+    }
     clearTimeout(timer);
-    if (!finished) console.warn('drain timed out; exiting with requests in flight');
+    if (!finished) {
+      console.warn('drain timed out; closing open connections');
+      for (const socket of s.tracked.sockets()) socket.destroy();
+    }
     await s.close().catch(() => {});
   }
   exit(0);

@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Agent, createServer, request, type IncomingHttpHeaders } from 'node:http';
-import type { AddressInfo } from 'node:net';
+import type { AddressInfo, Socket } from 'node:net';
 import { test } from 'node:test';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { createMcpHandler, McpServer, type McpHttpHandler } from '@modelcontextprotocol/server';
@@ -430,11 +430,11 @@ test('shutdown_exits_at_the_timeout_with_a_request_stuck', async (t) => {
     await shutdown({ server, tracked, close: spy.close }, 50, spy.onExit);
     assert.ok(performance.now() - started < 1_000);
     assert.deepEqual(spy.events, ['close', 'exit 0']);
-    assert.equal(tracked.inFlight(), 1, 'exits with the request still in flight');
-    assert.deepEqual(warn.mock.calls.map(c => c.arguments), [['drain timed out; exiting with requests in flight']]);
+    assert.deepEqual(warn.mock.calls.map(c => c.arguments), [['drain timed out; closing open connections']]);
+    // The stuck request's connection was destroyed at the timeout.
+    assert.equal(await inFlight, 'closed');
   } finally {
     server.closeAllConnections();
-    await inFlight;
   }
 });
 
@@ -458,7 +458,7 @@ test('shutdown_before_the_server_is_listening', async () => {
 // nothing for a while, so megabytes stay buffered and the window is wide enough to hit every time.
 const FLUSHING_BODY_BYTES = 16 * 1024 * 1024;
 
-async function flushingResponse() {
+async function flushingResponse(opts: { throttled?: boolean } = {}) {
   let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
   let entered!: () => void;
@@ -481,25 +481,41 @@ async function flushingResponse() {
     res.end = ((...args: unknown[]) => { const out = end(...args); ended(res.socket?.writableLength ?? 0); return out; }) as typeof res.end;
     tracked.listener(req, res);
   });
+  const serverSockets = new Set<Socket>();
+  server.on('connection', socket => serverSockets.add(socket));
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const port = (server.address() as AddressInfo).port;
   // A keep-alive client, as Traefik is: the connection becomes idle once the response ends.
   const agent = new Agent({ keepAlive: true });
   let resume!: () => void;
+  let bytes = 0;
+  let clientSocket: Socket | null = null;
   const received = new Promise<{ bytes: number; complete: boolean }>(resolve => {
     const req = request({ host: '127.0.0.1', port, method: 'POST', path: '/academic/mcp', headers: POST_HEADERS, agent }, res => {
       res.pause();
       resume = () => res.resume();
-      let bytes = 0;
-      res.on('data', (c: Buffer) => { bytes += c.length; });
+      clientSocket = res.socket;
+      res.on('data', (c: Buffer) => {
+        bytes += c.length;
+        // A slow reader keeps the kernel's buffers full to the end, so bytes are always still queued
+        // there when the server's last write completes.
+        if (opts.throttled) { res.pause(); setTimeout(() => res.resume(), 1); }
+      });
       res.on('end', () => resolve({ bytes, complete: true }));
+      // Cut short: 'error' (a reset) or just 'close' without 'end'. Resolving twice is harmless.
       res.on('error', () => resolve({ bytes, complete: false }));
+      res.on('close', () => resolve({ bytes, complete: res.complete }));
     });
-    req.on('error', () => resolve({ bytes: 0, complete: false }));
+    req.on('error', () => resolve({ bytes, complete: false }));
     req.end(POST_BODY);
   });
   await reached;
-  return { server, tracked, release, endedWith, received, resume: () => resume(), close: () => agent.destroy() };
+  /**
+   * Exit as the pod sees it: when PID 1 exits, the pod's network goes with it, and bytes the kernel
+   * still holds for a socket are never sent. Resetting every socket drops them the same way.
+   */
+  const podExit = () => { for (const socket of serverSockets) if (!socket.destroyed) socket.resetAndDestroy(); };
+  return { server, tracked, release, endedWith, received, resume: () => resume(), close: () => agent.destroy(), podExit, wireBytes: () => clientSocket?.bytesRead ?? 0 };
 }
 
 /** How long the client reads nothing: the response must wait for it, not be cut short. */
@@ -550,6 +566,60 @@ test('shutdown_started_while_a_response_is_flushing_lets_it_finish', async () =>
     assert.deepEqual(await r.received, { bytes: FLUSHING_BODY_BYTES, complete: true });
   } finally {
     r.close();
+  }
+});
+
+// Staging S1 again (d481c38): the last response before exit was logged ok and never arrived. Its bytes
+// were with the kernel when the request finished, but the exit took the pod's network, and so the
+// queued bytes, with it. The drain must end each connection and wait until the peer has closed it.
+test('shutdown_waits_for_keepalive_connections_to_close_before_exit', async () => {
+  const r = await flushingResponse({ throttled: true });
+  try {
+    const exited = stopSpy();
+    r.release();
+    assert.ok(await r.endedWith > 0);
+    let wireBytesAtExit = -1;
+    const stopping = shutdown({ server: r.server, tracked: r.tracked, close: exited.close }, 10_000, code => {
+      exited.onExit(code);
+      wireBytesAtExit = r.wireBytes();
+      r.podExit();
+    });
+    await new Promise(resolve => setTimeout(resolve, CLIENT_PAUSE_MS));
+    r.resume();
+    await stopping;
+    assert.deepEqual(exited.events, ['close', 'exit 0']);
+    assert.deepEqual(await r.received, { bytes: FLUSHING_BODY_BYTES, complete: true });
+    // The invariant: the client's socket had read every byte off the wire before the process exited.
+    assert.equal(wireBytesAtExit, r.wireBytes());
+  } finally {
+    r.close();
+  }
+});
+
+test('shutdown_closes_keepalive_connections_that_carry_a_request_during_the_drain', async () => {
+  const { mcp, release, reached } = gatedMcp();
+  const { server, tracked, port } = await drainServer(mcp);
+  const agent = new Agent({ keepAlive: true, maxSockets: 1 });
+  const get = () => new Promise<IncomingHttpHeaders>((resolve, reject) => {
+    request({ host: '127.0.0.1', port, path: '/healthz', agent }, res => { res.resume(); res.on('end', () => resolve(res.headers)); })
+      .on('error', reject).end();
+  });
+  const spy = stopSpy();
+  try {
+    assert.equal((await get()).connection, 'keep-alive');
+    // A second connection holds the drain open with a request in flight.
+    const inFlight = raw(port, 'POST', '/academic/mcp', POST_HEADERS, POST_BODY);
+    await reached;
+    const stopping = shutdown({ server, tracked, close: spy.close }, 5_000, spy.onExit);
+    // The kept-alive connection still carries a request; its response closes it.
+    assert.equal((await get()).connection, 'close');
+    release();
+    assert.equal((await inFlight).status, 200);
+    await stopping;
+    assert.deepEqual(spy.events, ['close', 'exit 0']);
+  } finally {
+    agent.destroy();
+    server.closeAllConnections();
   }
 });
 
