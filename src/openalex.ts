@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { inspect } from 'node:util';
 import { z } from 'zod';
 import { OpenAlexBudgetExhausted, OpenAlexError } from './errors.js';
@@ -15,6 +16,14 @@ const SELECT = [
   'id', 'doi', 'title', 'publication_year', 'type', 'is_retracted', 'cited_by_count', 'ids', 'authorships',
   'primary_location', 'best_oa_location', 'locations', 'biblio', 'open_access', 'abstract_inverted_index',
 ].join(',');
+
+/** Counts OpenAlex requests made inside `countOpenAlexRequests`, per async context (one tool call). */
+const requestCounter = new AsyncLocalStorage<{ calls: number }>();
+
+/** Runs `fn`; every OpenAlex request it makes, including failed ones, adds 1 to `counter.calls`. */
+export function countOpenAlexRequests<T>(counter: { calls: number }, fn: () => T): T {
+  return requestCounter.run(counter, fn);
+}
 
 export type WorkLocation = {
   is_oa: boolean | null;
@@ -196,6 +205,8 @@ export class OpenAlexClient {
   async #works(params: Record<string, string>): Promise<Page> {
     const url = new URL(WORKS_URL);
     url.search = new URLSearchParams({ ...params, select: SELECT, corpus: 'all' }).toString();
+    const counter = requestCounter.getStore();
+    if (counter) counter.calls++;
     let res: Response;
     try {
       res = await this.#fetch(url, {

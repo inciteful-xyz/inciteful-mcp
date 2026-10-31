@@ -71,7 +71,8 @@ function keys(works: Work[]): string[] {
   });
 }
 
-export function toBibtex(works: Work[]): string {
+/** One BibTeX entry per work, in order; keys are unique across the set. */
+export function bibtexEntries(works: Work[]): string[] {
   const ks = keys(works);
   return works.map((w, i) => {
     const kind = kindOf(w);
@@ -92,10 +93,15 @@ export function toBibtex(works: Work[]): string {
     const body = fields.filter((f): f is [string, string] => f[1] !== null)
       .map(([name, value]) => `  ${name} = {${name === 'author' ? value : bibEscape(value)}},\n`).join('');
     return `@${kind.bib}{${ks[i]},\n${body}}\n`;
-  }).join('\n');
+  });
 }
 
-export function toRis(works: Work[]): string {
+export function toBibtex(works: Work[]): string {
+  return bibtexEntries(works).join('\n');
+}
+
+/** One RIS record per work, in order, each ending in `ER  - \r\n`. */
+export function risEntries(works: Work[]): string[] {
   return works.map(w => {
     const lines: Array<[string, string | null]> = [
       ['TY', kindOf(w).ris],
@@ -111,5 +117,9 @@ export function toRis(works: Work[]): string {
     ];
     return lines.filter((l): l is [string, string] => l[1] !== null)
       .map(([tag, value]) => `${tag}  - ${value}\r\n`).join('') + 'ER  - \r\n';
-  }).join('\r\n');
+  });
+}
+
+export function toRis(works: Work[]): string {
+  return risEntries(works).join('\r\n');
 }

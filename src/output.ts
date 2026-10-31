@@ -1,4 +1,6 @@
-export const MAX_OUTPUT_BYTES = 60_000;
+import { OUTPUT_CAP_BYTES } from './limits.js';
+
+export const MAX_OUTPUT_BYTES = OUTPUT_CAP_BYTES;
 export const TRUNCATED_ADVISORY = 'Output truncated; narrow the request (lower limit, fewer seeds, a title filter).';
 
 const size = (v: unknown) => Buffer.byteLength(JSON.stringify(v));

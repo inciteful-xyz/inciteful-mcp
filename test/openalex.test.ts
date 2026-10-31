@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { inspect } from 'node:util';
-import { OpenAlexClient, compactWork, normalizeId, reconstructAbstract } from '../src/openalex.js';
+import { OpenAlexClient, compactWork, countOpenAlexRequests, normalizeId, reconstructAbstract } from '../src/openalex.js';
 import { OpenAlexBudgetExhausted, OpenAlexError } from '../src/errors.js';
 
 const KEY = 'SENTINEL-OA-KEY-7f3a9c';
@@ -260,4 +260,23 @@ test('errors_and_inspect_never_contain_key', async () => {
     assert.equal(String(text).includes(KEY), false, text);
   }
   assert.ok(errors.every(e => e instanceof OpenAlexError || e instanceof OpenAlexBudgetExhausted));
+});
+
+test('countOpenAlexRequests counts each request in its own async context', async () => {
+  const { fetcher } = fake(async () => { await new Promise(r => setTimeout(r, 5)); return page([raw('W1')]); });
+  const client = new OpenAlexClient(KEY, fetcher);
+  const a = { calls: 0 };
+  const b = { calls: 0 };
+  // works() with one W id and one DOI makes two requests; search makes one; a failure still counts.
+  await Promise.all([
+    countOpenAlexRequests(a, () => client.works(['W1', '10.1/x'])),
+    countOpenAlexRequests(b, () => client.search('q', { limit: 1 })),
+  ]);
+  assert.deepEqual([a.calls, b.calls], [2, 1]);
+  const failing = new OpenAlexClient(KEY, fake(() => new Response('', { status: 500 })).fetcher);
+  const c = { calls: 0 };
+  await assert.rejects(countOpenAlexRequests(c, () => failing.search('q', { limit: 1 })));
+  assert.equal(c.calls, 1);
+  // Outside a counter nothing breaks.
+  await client.search('q', { limit: 1 });
 });
