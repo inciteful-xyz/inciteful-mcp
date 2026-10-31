@@ -719,15 +719,12 @@ test('read_paper', async () => {
     assert.equal(text(r), 'OpenAlex was unavailable for that paper (unavailable); retry shortly.');
     assert.equal(settled[0].outcome, 'upstream_unavailable');
   });
-  // A chunk too big for the output cap is cut, and next_offset continues where it stops.
+  // max_chars is the only bound on the text: a large chunk comes back whole, with the reader's next_offset.
   const big = 'é'.repeat(50_000);
   await withClient({ readPaper: async (_w, offset) => ({ text: big, nextOffset: offset + big.length, sha256: 'ab'.repeat(32), license: null, links: [] }) }, async ({ call }) => {
-    const r = await call('read_paper', { id: 'W1', offset: 100, max_chars: 50_000 });
-    const sc = r.structuredContent!;
-    assert.ok(Buffer.byteLength(text(r)) <= 60_000);
-    assert.ok(sc.text.length < 50_000 && sc.text.length > 20_000);
-    assert.equal(sc.next_offset, 100 + sc.text.length);
-    assert.ok(sc.diagnostics.advisories.some((a: string) => a.includes('next_offset')));
+    const sc = (await call('read_paper', { id: 'W1', offset: 100, max_chars: 50_000 })).structuredContent!;
+    assert.equal(sc.text, big);
+    assert.equal(sc.next_offset, 50_100);
   });
   await withClient({ readPaper: async () => ({ nextOffset: null, sha256: null, license: null, links: [{ url: 'https://example.org/x.pdf', format: 'pdf', source: 'Repo', is_oa: true, license: null, version: null, priority: 0 }] }) }, async ({ call }) => {
     const sc = (await call('read_paper', { id: 'W1' })).structuredContent!;
@@ -970,13 +967,13 @@ test('a_late_rejection_after_the_ceiling_is_handled', async () => {
   }
 });
 
-test('connector_output_capped_without_dangling_references', async () => {
-  // 1,000 paths of 3 to 6 nodes between W1 and W2, through 3,000 distinct middle papers.
+test('connector_keeps_the_25_shortest_paths_without_dangling_references', async () => {
+  // 1,000 paths of 3 to 6 nodes between W1 and W2, through 3,000 distinct middle papers, longest first.
   const paths: string[][] = [];
   const papers = new Map<string, SimilarPaper>([['W1', paper('W1', 0)], ['W2', paper('W2', 0)]]);
   const connections: Array<{ citing: string; cited: string }> = [];
   for (let i = 0; i < 1000; i++) {
-    const middle = Array.from({ length: 1 + ((999 - i) % 4) }, (_, j) => `W${10_000 + i * 4 + j}`);
+    const middle = Array.from({ length: 4 - (i % 4) }, (_, j) => `W${10_000 + i * 4 + j}`);
     const path = ['W1', ...middle, 'W2'];
     paths.push(path);
     for (const id of middle) papers.set(id, { ...paper(id, 0), title: `A fairly long title for paper ${id} in the connector` });
@@ -988,18 +985,26 @@ test('connector_output_capped_without_dangling_references', async () => {
     assert.ok(Buffer.byteLength(text(r)) <= 60_000);
     const sc = r.structuredContent!;
     assert.equal(sc.truncated, true);
-    const k = sc.paths.length;
-    assert.ok(k > 10 && k < 1000);
-    assert.ok(sc.diagnostics.advisories.includes(`Showing ${k} of 1000 paths (shortest first); the longer ones were left out to fit the output size.`));
-    const lengths = sc.paths.map((p: string[]) => p.length);
-    assert.deepEqual(lengths, [...lengths].sort((a: number, b: number) => a - b), 'shortest first');
-    assert.deepEqual(sc.provenance.hops, lengths.map((n: number) => n - 1));
+    assert.equal(sc.paths.length, 25);
+    assert.ok(sc.diagnostics.advisories.includes('Showing 25 of 1000 paths (shortest first); the longer ones were left out.'));
+    // The shortest are kept: every 4th input path has one middle paper (3 nodes), and there are 250 of them.
+    assert.deepEqual(sc.paths.map((p: string[]) => p.length), Array(25).fill(3));
+    assert.deepEqual(sc.paths[0], ['W1', 'W10012', 'W2'], 'a stable sort keeps input order among equals');
+    assert.deepEqual(sc.provenance.hops, Array(25).fill(2));
     const rowIds = new Set(sc.rows.map((p: any) => p.paper_id));
     for (const p of sc.paths) for (const id of p) assert.ok(rowIds.has(id), `path node ${id} in rows`);
     for (const e of sc.edges) assert.ok(rowIds.has(e.citing) && rowIds.has(e.cited), 'edge endpoints in rows');
-    const onPaths = new Set(sc.paths.flat());
-    assert.equal(sc.rows.length, onPaths.size, 'no paper off the kept paths');
+    assert.equal(sc.rows.length, new Set(sc.paths.flat()).size, 'no paper off the kept paths');
+    assert.equal(sc.edges.length, 50);
     assert.equal(sc.diagnostics.advisories.filter((a: string) => a.startsWith('Output truncated')).length, 0, 'capResult had nothing left to trim');
+  });
+  // 25 paths or fewer: all kept, nothing flagged.
+  const few = paths.slice(0, 25);
+  await withClient({ connector: async () => ({ paths: few, papers: [...papers.values()], connections, num_paths: 25, papers_searched: 50_000, max_hops: 5 }) }, async ({ call }) => {
+    const sc = (await call('connect_papers', { from: 'W1', to: 'W2', extended: true })).structuredContent!;
+    assert.equal(sc.paths.length, 25);
+    assert.equal(sc.truncated, false);
+    assert.equal(sc.diagnostics.advisories.filter((a: string) => a.startsWith('Showing')).length, 0);
   });
 });
 

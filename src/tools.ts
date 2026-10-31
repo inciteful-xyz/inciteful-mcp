@@ -11,8 +11,8 @@ import {
 } from './errors.js';
 import type { ConnectorPaper, GraphClient, SimilarPaper } from './graph.js';
 import {
-  DEFAULT_SQL_LIMIT, GRACE_MS, MAX_ANALYSIS_LIMIT, MAX_ID_CHARS, MAX_PAPER_IDS, MAX_QUERY_CHARS, MAX_READ_CHARS, MAX_SEARCH_LIMIT, MAX_SEEDS, MAX_SQL_CHARS, MAX_SQL_LIMIT, MIN_SQL_LIMIT,
-  METADATA_WAIT_MS, OUTPUT_CAP_BYTES, TOOL_CEILING_MS, URL_SEED_CAP, type ToolName,
+  DEFAULT_SQL_LIMIT, GRACE_MS, MAX_ANALYSIS_LIMIT, MAX_CONNECTOR_PATHS, MAX_ID_CHARS, MAX_PAPER_IDS, MAX_QUERY_CHARS, MAX_READ_CHARS, MAX_SEARCH_LIMIT, MAX_SEEDS, MAX_SQL_CHARS, MAX_SQL_LIMIT, MIN_SQL_LIMIT,
+  METADATA_WAIT_MS, TOOL_CEILING_MS, URL_SEED_CAP, type ToolName,
 } from './limits.js';
 import { countOpenAlexRequests, type OpenAlexClient, type Work } from './openalex.js';
 import { capResult } from './output.js';
@@ -575,29 +575,24 @@ export function createServerFactory(deps: ToolDeps): McpServerFactory {
       const [from, to] = [fromSeed.id, toSeed.id];
       const res = await buildCap.run(capKey('connector', from, to, a.extended), () => graph.connector(from, to, a.extended), call.deadlineAt);
       call.graphPapers = res.papers_searched;
-      // Shortest first (a stable sort), so trimming to fit keeps the most direct connections.
-      const paths = [...res.paths].sort((x, y) => x.length - y.length);
-      const meta = { snapshot: res.snapshot, recentTier: res.recentTier };
-      // The result from the first k paths: papers and edges on those paths only, so nothing dangles.
-      const build = (k: number) => {
-        const kept = paths.slice(0, k);
-        const onPaths = new Set(kept.flat());
-        const out = provenanceFor('connect_papers', r, meta, {
-          method, filters: { extended: a.extended }, fastPath: 'connector',
-          connector: { papersSearched: res.papers_searched, hops: kept.map(p => p.length - 1) },
-        }, null);
-        if (!paths.length) out.diagnostics.advisories.unshift('No citation path was found between the two papers within the search; try extended: true.');
-        if (k < paths.length) {
-          out.diagnostics.advisories.unshift(`Showing ${k} of ${paths.length} paths (shortest first); the longer ones were left out to fit the output size.`);
-        }
-        return {
-          rows: res.papers.filter(p => onPaths.has(p.id)).map(graphPaperRow),
-          paths: kept,
-          edges: res.connections.filter(e => onPaths.has(e.citing) && onPaths.has(e.cited)),
-          ...out, inciteful_url: urls.connectorUrl(from, to), truncated: k < paths.length,
-        };
+      // Shortest first (a stable sort), so the cut keeps the most direct connections. Papers and edges
+      // are those on the kept paths only, so nothing dangles.
+      const sorted = [...res.paths].sort((x, y) => x.length - y.length);
+      const kept = sorted.slice(0, MAX_CONNECTOR_PATHS);
+      const onPaths = new Set(kept.flat());
+      const out = provenanceFor('connect_papers', r, { snapshot: res.snapshot, recentTier: res.recentTier }, {
+        method, filters: { extended: a.extended }, fastPath: 'connector',
+        connector: { papersSearched: res.papers_searched, hops: kept.map(p => p.length - 1) },
+      }, null);
+      if (!sorted.length) out.diagnostics.advisories.unshift('No citation path was found between the two papers within the search; try extended: true.');
+      const truncated = kept.length < sorted.length;
+      if (truncated) out.diagnostics.advisories.unshift(`Showing ${kept.length} of ${sorted.length} paths (shortest first); the longer ones were left out.`);
+      return {
+        rows: res.papers.filter(p => onPaths.has(p.id)).map(graphPaperRow),
+        paths: kept,
+        edges: res.connections.filter(e => onPaths.has(e.citing) && onPaths.has(e.cited)),
+        ...out, inciteful_url: urls.connectorUrl(from, to), truncated,
       };
-      return fitConnector(build, paths.length);
     });
 
     register('query_citation_graph', z.object({
@@ -654,12 +649,11 @@ export function createServerFactory(deps: ToolDeps): McpServerFactory {
       const links = read.links.map(({ priority: _priority, ...l }: ContentLink) => l);
       const advisories: string[] = [];
       if (read.text === undefined) advisories.push('PMC has no open full text for this paper; the links in rows may have it.');
-      const value = {
+      return {
         openalex_id: w.id, doi: bareDoi(w.doi), title: w.title, pmcid: w.ids.pmcid, text: read.text ?? null, offset: a.offset,
         next_offset: read.nextOffset, sha256: read.sha256, license: read.license, rows: links, inciteful_url: urls.paperUrl(w.id),
         diagnostics: { advisories },
       };
-      return fitText(value);
     });
 
     register('export_citations', z.object({
@@ -684,48 +678,4 @@ export function createServerFactory(deps: ToolDeps): McpServerFactory {
 
     return server;
   };
-}
-
-/**
- * The connector result from the largest number of (shortest-first) paths whose serialized result fits
- * the output cap. `build(k)` makes the whole result from the first k paths.
- */
-function fitConnector<T>(build: (k: number) => T, n: number): T {
-  const fits = (k: number) => Buffer.byteLength(JSON.stringify(build(k))) <= OUTPUT_CAP_BYTES;
-  if (fits(n)) return build(n);
-  let lo = 0;
-  let hi = n - 1;
-  while (lo < hi) {
-    const mid = Math.ceil((lo + hi) / 2);
-    if (fits(mid)) lo = mid;
-    else hi = mid - 1;
-  }
-  return build(lo);
-}
-
-type ReadValue = { text: string | null; offset: number; next_offset: number | null; diagnostics: { advisories: string[] }; rows: unknown[] };
-
-/**
- * Shortens a read_paper chunk until the serialized result fits the output cap, and points next_offset
- * at the first character left out, so reading continues where the chunk stops.
- */
-function fitText<T extends ReadValue>(value: T): T {
-  const size = (v: T) => Buffer.byteLength(JSON.stringify({ ...v, truncated: false }));
-  const full = value.text;
-  if (full === null || size(value) <= OUTPUT_CAP_BYTES) return value;
-  const advisory = 'The text chunk was shortened to fit the output size; continue from next_offset.';
-  const withChars = (n: number): T => ({
-    ...value, text: full.slice(0, n), next_offset: value.offset + n,
-    diagnostics: { advisories: [...value.diagnostics.advisories, advisory] },
-  });
-  let lo = 0;
-  let hi = full.length;
-  while (lo < hi) {
-    const mid = Math.ceil((lo + hi) / 2);
-    if (size(withChars(mid)) <= OUTPUT_CAP_BYTES) lo = mid;
-    else hi = mid - 1;
-  }
-  // Never end on half of a surrogate pair.
-  const code = full.charCodeAt(lo - 1);
-  return withChars(code >= 0xd800 && code <= 0xdbff ? lo - 1 : lo);
 }

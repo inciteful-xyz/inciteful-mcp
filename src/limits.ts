@@ -46,6 +46,14 @@ export const MAX_ID_CHARS = 300;
 export const MAX_READ_CHARS = 50_000;
 /** Serialized result size (`Buffer.byteLength` of the JSON) above which rows are trimmed. */
 export const OUTPUT_CAP_BYTES = 60_000;
+/**
+ * connect_papers returns at most this many paths, shortest first. A path adds up to its middle
+ * papers as rows, at about 450 bytes each with real titles, journals and authors, plus its edges:
+ * about 2.1 KB for a 5-hop path whose papers are all new. 25 of those come to about 53 KB with the
+ * provenance, so the result fits the output cap without capResult trimming rows (which would leave
+ * paths naming papers that aren't in rows), and 25 is more than an assistant can discuss.
+ */
+export const MAX_CONNECTOR_PATHS = 25;
 /** Seed-set links to the web app carry at most this many ids, to fit URL limits. */
 export const URL_SEED_CAP = 50;
 
