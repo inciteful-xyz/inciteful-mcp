@@ -1,0 +1,262 @@
+// The HTTP front: routing at /academic/mcp (spec §4.2), CORS, the rate limit, the request context
+// for usage rows, and the SIGTERM drain. Nothing here logs: stdout and stderr carry no request data.
+
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { readFile } from 'node:fs/promises';
+import type { IncomingMessage, OutgoingHttpHeaders, Server, ServerResponse } from 'node:http';
+import { join } from 'node:path';
+import { toNodeHandler } from '@modelcontextprotocol/node';
+import type { McpHttpHandler } from '@modelcontextprotocol/server';
+import type { Config } from './config.js';
+import { callerKey, USAGE_CLIENT_MAX_CHARS, type RateLimiter } from './limits.js';
+import type { ToolSettled } from './tools.js';
+import type { GraphMeta, Pages, UsageSink } from './types.js';
+
+const MCP_PATH = '/academic/mcp';
+const MCP_SLASH = '/academic/mcp/';
+const ASSET_PREFIX = '/academic/mcp/assets/';
+
+const ALLOW_MCP = 'GET, HEAD, POST, OPTIONS';
+const ALLOW_PAGE = 'GET, HEAD';
+
+const CORS_PREFLIGHT = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
+  'Access-Control-Allow-Headers': 'content-type, accept, mcp-protocol-version, mcp-method, mcp-name, last-event-id',
+  'Access-Control-Max-Age': '86400',
+} as const;
+
+/**
+ * Served asset names → file in `assetsDir` and its type. Only these names are served, so no request
+ * path ever reaches the file system. Task 7 adds the page assets.
+ */
+export const ASSETS: Readonly<Record<string, { file: string; type: string }>> = {
+  'favicon.svg': { file: 'favicon.svg', type: 'image/svg+xml' },
+};
+const ASSET_CACHE = 'public, max-age=31536000, immutable';
+
+// ---------------------------------------------------------------------------------------------
+// Request context and usage rows
+
+/** Per MCP request; `onToolSettled` reads it to write the usage row. Holds no request content. */
+export type RequestContext = { callerKey: string; userAgent: string | null; startedAt: number };
+export const requestContext = new AsyncLocalStorage<RequestContext>();
+
+/**
+ * The factory's `onToolSettled`: one usage row per `tools/call`. Client name and version come from
+ * the 2026 envelope's client info, else the User-Agent (cut to 100 characters) stands in for the name.
+ */
+export function recordToolCalls(usage: UsageSink, now: () => number = Date.now): (e: ToolSettled) => void {
+  return (e) => {
+    const ctx = requestContext.getStore();
+    if (!ctx) return;
+    usage.record({
+      tool: e.tool,
+      clientName: e.clientInfo ? e.clientInfo.name : ctx.userAgent?.slice(0, USAGE_CLIENT_MAX_CHARS) ?? null,
+      clientVersion: e.clientInfo ? e.clientInfo.version : null,
+      callerKey: ctx.callerKey,
+      durationMs: Math.max(0, now() - ctx.startedAt),
+      outcome: e.outcome,
+      graphPapers: e.graphPapers,
+      graphDepth: e.graphDepth,
+      openalexCalls: e.openalexCalls,
+    });
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// The app
+
+export type AppDeps = {
+  config: Config;
+  mcp: McpHttpHandler;
+  pages: Pages;
+  graphMeta: () => GraphMeta;
+  limiter: Pick<RateLimiter, 'check'>;
+  usage: UsageSink & { recordRejection(k: string): void };
+  assetsDir: string;
+};
+
+/** `Host` without a default port, lower-cased. */
+function hostOf(req: IncomingMessage): string {
+  return (req.headers.host ?? '').toLowerCase().replace(/:(80|443)$/, '');
+}
+
+export function createApp(deps: AppDeps): (req: IncomingMessage, res: ServerResponse) => void {
+  const prodHost = deps.config.publicBaseUrl.host.toLowerCase();
+  const assetCache = new Map<string, Buffer>();
+
+  // The SDK's responses get our cache, indexing and CORS headers. They are set on the Response,
+  // because toNodeHandler writes the Response's headers itself.
+  const mcpNode = toNodeHandler({
+    fetch: async (request: Request, options?: Parameters<McpHttpHandler['fetch']>[1]) => {
+      const response = await deps.mcp.fetch(request, options);
+      const headers = new Headers(response.headers);
+      headers.set('Cache-Control', 'no-store, no-transform');
+      headers.set('X-Robots-Tag', 'noindex');
+      headers.set('Access-Control-Allow-Origin', '*');
+      return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+    },
+  });
+
+  const send = (req: IncomingMessage, res: ServerResponse, status: number, headers: OutgoingHttpHeaders, body: string | Buffer = '') => {
+    res.writeHead(status, { 'Content-Length': Buffer.byteLength(body), ...headers });
+    res.end(req.method === 'HEAD' ? undefined : body);
+  };
+
+  /** Every non-HTML response is noindex. */
+  const sendOther = (req: IncomingMessage, res: ServerResponse, status: number, headers: OutgoingHttpHeaders, body?: string | Buffer) =>
+    send(req, res, status, { 'X-Robots-Tag': 'noindex', ...headers }, body);
+
+  /** HTML is noindex only off the production host. */
+  const sendHtml = (req: IncomingMessage, res: ServerResponse, status: number, page: keyof Pages) => {
+    const html = deps.pages[page]({ publicBaseUrl: deps.config.publicBaseUrl, ...deps.graphMeta() });
+    const headers: OutgoingHttpHeaders = { 'Content-Type': 'text/html; charset=utf-8', Vary: 'Accept', 'Cache-Control': 'no-cache' };
+    if (hostOf(req) !== prodHost) headers['X-Robots-Tag'] = 'noindex';
+    send(req, res, status, headers, html);
+  };
+
+  const methodNotAllowed = (req: IncomingMessage, res: ServerResponse, allow: string, mcp: boolean) => {
+    if (mcp) {
+      const body = JSON.stringify({ jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed.' }, id: null });
+      sendOther(req, res, 405, { Allow: allow, 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }, body);
+    } else {
+      sendOther(req, res, 405, { Allow: allow, 'Content-Type': 'text/plain; charset=utf-8' }, 'Method Not Allowed');
+    }
+  };
+
+  async function serveMcp(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const key = callerKey(req);
+    const verdict = deps.limiter.check(key);
+    if (!verdict.ok) {
+      deps.usage.recordRejection(key);
+      const body = JSON.stringify({ jsonrpc: '2.0', error: { code: -32000, message: `Rate limit exceeded; retry in ${verdict.retryAfterSecs} seconds.` }, id: null });
+      sendOther(req, res, 429, { 'Retry-After': String(verdict.retryAfterSecs), 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }, body);
+      return;
+    }
+    const ua = req.headers['user-agent'];
+    const ctx: RequestContext = { callerKey: key, userAgent: typeof ua === 'string' && ua ? ua : null, startedAt: Date.now() };
+    // Node holds written headers until the first body chunk, and an SSE stream's first chunk is the
+    // tool result. Flush them as soon as toNodeHandler writes them, so proxies and the client see
+    // the response start before any read timeout.
+    const writeHead = res.writeHead.bind(res) as (...args: unknown[]) => ServerResponse;
+    res.writeHead = ((...args: unknown[]) => {
+      const out = writeHead(...args);
+      res.flushHeaders();
+      return out;
+    }) as ServerResponse['writeHead'];
+    await requestContext.run(ctx, () => mcpNode(req, res));
+  }
+
+  async function serveAsset(req: IncomingMessage, res: ServerResponse, name: string): Promise<void> {
+    const asset = Object.hasOwn(ASSETS, name) ? ASSETS[name] : undefined;
+    if (!asset) return sendHtml(req, res, 404, 'notFound');
+    if (req.method !== 'GET' && req.method !== 'HEAD') return methodNotAllowed(req, res, ALLOW_PAGE, false);
+    let body = assetCache.get(name);
+    if (!body) {
+      try {
+        body = await readFile(join(deps.assetsDir, asset.file));
+      } catch {
+        return sendHtml(req, res, 404, 'notFound');
+      }
+      assetCache.set(name, body);
+    }
+    sendOther(req, res, 200, { 'Content-Type': asset.type, 'Cache-Control': ASSET_CACHE }, body);
+  }
+
+  async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const url = req.url ?? '/';
+    const q = url.indexOf('?');
+    const pathname = q === -1 ? url : url.slice(0, q);
+    const method = req.method ?? 'GET';
+    const getOrHead = method === 'GET' || method === 'HEAD';
+
+    if (pathname === MCP_PATH || pathname === MCP_SLASH) {
+      if (method === 'POST') return serveMcp(req, res);
+      if (method === 'OPTIONS') return sendOther(req, res, 204, CORS_PREFLIGHT);
+      if (method === 'GET' && (req.headers.accept ?? '').toLowerCase().includes('text/event-stream')) {
+        return methodNotAllowed(req, res, ALLOW_MCP, true);
+      }
+      if (!getOrHead) return methodNotAllowed(req, res, ALLOW_MCP, true);
+      if (pathname === MCP_SLASH) return sendOther(req, res, 301, { Location: MCP_PATH + (q === -1 ? '' : url.slice(q)) });
+      return sendHtml(req, res, 200, 'landing');
+    }
+    if (pathname === `${MCP_PATH}/privacy` || pathname === `${MCP_PATH}/terms`) {
+      if (!getOrHead) return methodNotAllowed(req, res, ALLOW_PAGE, false);
+      return sendHtml(req, res, 200, pathname.endsWith('privacy') ? 'privacy' : 'terms');
+    }
+    if (pathname.startsWith(ASSET_PREFIX)) return serveAsset(req, res, pathname.slice(ASSET_PREFIX.length));
+    if (pathname === '/healthz') {
+      if (!getOrHead) return methodNotAllowed(req, res, ALLOW_PAGE, false);
+      return sendOther(req, res, 200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' }, 'ok');
+    }
+    return sendHtml(req, res, 404, 'notFound');
+  }
+
+  return (req, res) => {
+    route(req, res).catch(() => {
+      // No logging: the error could carry request data. Answer if we still can.
+      if (!res.headersSent) sendOther(req, res, 500, { 'Content-Type': 'text/plain; charset=utf-8' }, 'Internal Server Error');
+      else res.destroy();
+    });
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// In-flight tracking and the SIGTERM drain
+
+const DRAIN_SWEEP_MS = 250;
+
+export type Tracked = {
+  listener: (req: IncomingMessage, res: ServerResponse) => void;
+  inFlight: () => number;
+  /** Resolves when no request is in flight. */
+  idle: () => Promise<void>;
+};
+
+/** Counts requests from arrival until their response closes (finished or aborted). */
+export function trackInFlight(listener: (req: IncomingMessage, res: ServerResponse) => void): Tracked {
+  let count = 0;
+  let waiters: Array<() => void> = [];
+  const settle = () => {
+    count -= 1;
+    if (count === 0) {
+      const ready = waiters;
+      waiters = [];
+      for (const w of ready) w();
+    }
+  };
+  return {
+    listener: (req, res) => {
+      count += 1;
+      res.once('close', settle);
+      listener(req, res);
+    },
+    inFlight: () => count,
+    idle: () => (count === 0 ? Promise.resolve() : new Promise<void>(resolve => waiters.push(resolve))),
+  };
+}
+
+/**
+ * Stops accepting connections and waits up to `timeoutMs` for in-flight requests to finish. Idle
+ * keep-alive connections are closed as they free up; at the timeout every connection is closed.
+ * Resolves true when everything finished in time.
+ */
+export async function drain(server: Server, tracked: Tracked, timeoutMs: number): Promise<boolean> {
+  const closed = new Promise<void>(resolve => server.close(() => resolve()));
+  server.closeIdleConnections();
+  // A keep-alive connection becomes idle when its response ends; close those as they appear.
+  const sweeper = setInterval(() => server.closeIdleConnections(), DRAIN_SWEEP_MS);
+  let timer: NodeJS.Timeout | undefined;
+  const timedOut = new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), timeoutMs); });
+  try {
+    const done = await Promise.race([tracked.idle().then(() => true as const), timedOut]);
+    if (!done) server.closeAllConnections();
+    else server.closeIdleConnections();
+    await closed;
+    return done;
+  } finally {
+    clearInterval(sweeper);
+    clearTimeout(timer);
+  }
+}

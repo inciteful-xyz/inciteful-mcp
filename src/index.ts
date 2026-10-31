@@ -1,0 +1,79 @@
+// Entry point: config, clients, usage log, MCP handler, HTTP server on 0.0.0.0:8080, SIGTERM drain.
+// Output is startup lines and fixed warnings only; nothing here prints request data or config values.
+
+import { readFileSync } from 'node:fs';
+import { createServer } from 'node:http';
+import { fileURLToPath } from 'node:url';
+import { createMcpHandler } from '@modelcontextprotocol/server';
+import { loadConfig, type Config } from './config.js';
+import { ContentClient } from './content.js';
+import { GraphClient } from './graph.js';
+import { createApp, drain, recordToolCalls, trackInFlight } from './http.js';
+import { BUILD_CAP, BuildCap, RATE_LIMIT_PER_MINUTE, RateLimiter, VENDOR_RANGES, VENDOR_RATE_LIMIT_PER_MINUTE } from './limits.js';
+import { OpenAlexClient } from './openalex.js';
+import { createServerFactory } from './tools.js';
+import type { Pages } from './types.js';
+import { UsageLog } from './usage.js';
+
+const HOST = '0.0.0.0';
+const PORT = 8080;
+/** In-flight requests get this long after SIGTERM; the pod's grace period is 100 s. */
+const DRAIN_TIMEOUT_MS = 90_000;
+const VERSION = (JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }).version;
+const ASSETS_DIR = fileURLToPath(new URL('../assets/', import.meta.url));
+
+// TODO(Task 7): replace with the real landing, privacy, terms and 404 pages.
+const placeholderPages: Pages = {
+  landing: () => '<!doctype html><title>Inciteful academic MCP</title><h1>Inciteful academic MCP</h1>',
+  privacy: () => '<!doctype html><title>Privacy</title><h1>Privacy</h1>',
+  terms: () => '<!doctype html><title>Terms</title><h1>Terms</h1>',
+  notFound: () => '<!doctype html><title>Not found</title><h1>Not found</h1>',
+};
+
+let config: Config;
+try {
+  config = loadConfig(process.env);
+} catch (err) {
+  // loadConfig's messages name the variable, never its value.
+  console.error(err instanceof Error ? err.message : 'invalid configuration');
+  process.exit(1);
+}
+
+const graph = new GraphClient(config);
+const openalex = new OpenAlexClient(config.openalexKey);
+const content = new ContentClient();
+const usage = new UsageLog(config.usageDbPath, { now: () => new Date() });
+const buildCap = new BuildCap(BUILD_CAP);
+const limiter = new RateLimiter({
+  perMinute: RATE_LIMIT_PER_MINUTE, vendorPerMinute: VENDOR_RATE_LIMIT_PER_MINUTE, vendorRanges: VENDOR_RANGES, now: Date.now,
+});
+const factory = createServerFactory({
+  graph, openalex, content, buildCap, version: VERSION, publicBaseUrl: config.publicBaseUrl, now: () => new Date(),
+  onToolSettled: recordToolCalls(usage),
+});
+const handler = createMcpHandler(factory, { responseMode: 'sse', keepAliveMs: 15_000 });
+
+// One resolve so the pages have a graph snapshot date; a failure only leaves it blank.
+await graph.resolve([]).catch(() => {});
+
+const tracked = trackInFlight(createApp({
+  config, mcp: handler, pages: placeholderPages, graphMeta: () => graph.lastMeta, limiter, usage, assetsDir: ASSETS_DIR,
+}));
+const server = createServer(tracked.listener);
+server.listen(PORT, HOST, () => {
+  console.log(`inciteful-mcp ${VERSION} listening on ${HOST}:${PORT}`);
+});
+
+let stopping = false;
+process.on('SIGTERM', () => {
+  if (stopping) return;
+  stopping = true;
+  console.log('SIGTERM: draining');
+  void (async () => {
+    const finished = await drain(server, tracked, DRAIN_TIMEOUT_MS).catch(() => false);
+    if (!finished) console.warn('drain timed out; closing open connections');
+    await handler.close().catch(() => {});
+    usage.close();
+    process.exit(0);
+  })();
+});

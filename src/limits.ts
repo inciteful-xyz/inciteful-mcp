@@ -1,5 +1,10 @@
-// Limits and constants for the hosted server (plan Global Constraints). Task 6 adds the rate limiter
-// and the build cap classes to this file.
+// Limits and constants for the hosted server (plan Global Constraints), the caller key, the rate
+// limiter and the build cap.
+
+import type { IncomingMessage } from 'node:http';
+import { isIP } from 'node:net';
+import { BuildDeadlineError } from './errors.js';
+import type { BuildCapLike } from './types.js';
 
 /** The eight tool names. `tools.ts` registers exactly these; the usage log stores any other name as NULL. */
 export const TOOL_NAMES = [
@@ -93,3 +98,235 @@ export const USAGE_RETENTION_DAYS = 90;
 export const USAGE_CLIENT_MAX_CHARS = 100;
 /** Random bytes in the daily `ip_hash` salt. */
 export const USAGE_SALT_BYTES = 32;
+
+// ---------------------------------------------------------------------------------------------
+// Caller key
+
+/** The eight 16-bit groups of an IPv6 address (zone id dropped), or null. */
+function ipv6Groups(addr: string): number[] | null {
+  const bare = addr.replace(/%.*$/, '');
+  if (isIP(bare) !== 6) return null;
+  let text = bare;
+  // A trailing dotted IPv4 part becomes two groups.
+  const v4 = /(\d+\.\d+\.\d+\.\d+)$/.exec(text);
+  if (v4) {
+    const [a, b, c, d] = v4[1].split('.').map(Number);
+    text = `${text.slice(0, -v4[1].length)}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
+  }
+  const [head, tail] = text.includes('::') ? text.split('::') : [text, null];
+  const parse = (part: string) => (part ? part.split(':').map(h => parseInt(h, 16)) : []);
+  const left = parse(head);
+  const right = tail === null ? [] : parse(tail);
+  const fill = tail === null ? [] : new Array<number>(8 - left.length - right.length).fill(0);
+  const groups = [...left, ...fill, ...right];
+  return groups.length === 8 ? groups : null;
+}
+
+/** IPv4 stays as it is; IPv4-mapped IPv6 becomes IPv4; other IPv6 becomes its /64. Null if not an IP. */
+function normalizeIp(raw: string): string | null {
+  const addr = raw.trim();
+  if (isIP(addr) === 4) return addr;
+  const g = ipv6Groups(addr);
+  if (!g) return null;
+  if (g.slice(0, 5).every(x => x === 0) && g[5] === 0xffff) {
+    return [g[6] >> 8, g[6] & 0xff, g[7] >> 8, g[7] & 0xff].join('.');
+  }
+  return `${g.slice(0, 4).map(x => x.toString(16)).join(':')}::/64`;
+}
+
+/**
+ * The rate-limit and usage key: `CF-Connecting-IP` when it holds an IP, else the TCP peer.
+ * `X-Forwarded-For` is never read: any client can set it.
+ */
+export function callerKey(req: IncomingMessage): string {
+  const header = req.headers['cf-connecting-ip'];
+  const cf = typeof header === 'string' ? normalizeIp(header) : null;
+  if (cf) return cf;
+  const peer = req.socket.remoteAddress;
+  return (peer && normalizeIp(peer)) ?? 'unknown';
+}
+
+// ---------------------------------------------------------------------------------------------
+// Rate limiter
+
+const ipv4ToInt = (ip: string) => ip.split('.').reduce((n, part) => n * 256 + Number(part), 0);
+
+type Range = { label: string; base: number; size: number };
+
+function parseRange(cidr: string): Range {
+  const [ip, bits] = cidr.split('/');
+  const prefix = Number(bits);
+  if (isIP(ip) !== 4 || !Number.isInteger(prefix) || prefix < 0 || prefix > 32) throw new Error(`invalid IPv4 CIDR: ${cidr}`);
+  const size = 2 ** (32 - prefix);
+  return { label: cidr, base: Math.floor(ipv4ToInt(ip) / size) * size, size };
+}
+
+type Bucket = { tokens: number; at: number; capacity: number };
+
+/** Buckets kept before full (idle) ones are swept. */
+const BUCKET_SWEEP_AT = 10_000;
+
+/**
+ * A token bucket per caller key, refilling continuously at `perMinute` per minute up to `perMinute`.
+ * Keys inside a vendor range share that range's bucket of `vendorPerMinute`.
+ */
+export class RateLimiter {
+  readonly #perMinute: number;
+  readonly #vendorPerMinute: number;
+  readonly #ranges: Range[];
+  readonly #now: () => number;
+  readonly #buckets = new Map<string, Bucket>();
+
+  constructor(opts: { perMinute: number; vendorPerMinute: number; vendorRanges: readonly string[]; now: () => number }) {
+    this.#perMinute = opts.perMinute;
+    this.#vendorPerMinute = opts.vendorPerMinute;
+    this.#ranges = opts.vendorRanges.map(parseRange);
+    this.#now = opts.now;
+  }
+
+  check(key: string): { ok: boolean; retryAfterSecs: number } {
+    const now = this.#now();
+    const range = isIP(key) === 4 ? this.#rangeOf(ipv4ToInt(key)) : null;
+    const id = range ? `range:${range.label}` : `key:${key}`;
+    const capacity = range ? this.#vendorPerMinute : this.#perMinute;
+    let bucket = this.#buckets.get(id);
+    if (!bucket) {
+      if (this.#buckets.size >= BUCKET_SWEEP_AT) this.#sweep(now);
+      bucket = { tokens: capacity, at: now, capacity };
+      this.#buckets.set(id, bucket);
+    }
+    this.#refill(bucket, now);
+    if (bucket.tokens >= 1) {
+      bucket.tokens -= 1;
+      return { ok: true, retryAfterSecs: 0 };
+    }
+    const msPerToken = 60_000 / capacity;
+    // Rounded to whole ms first, so float error can't add a second.
+    const waitMs = Math.round((1 - bucket.tokens) * msPerToken);
+    return { ok: false, retryAfterSecs: Math.max(1, Math.ceil(waitMs / 1000)) };
+  }
+
+  #rangeOf(ip: number): Range | null {
+    return this.#ranges.find(r => ip >= r.base && ip < r.base + r.size) ?? null;
+  }
+
+  #refill(bucket: Bucket, now: number): void {
+    const elapsed = Math.max(0, now - bucket.at);
+    bucket.tokens = Math.min(bucket.capacity, bucket.tokens + (elapsed * bucket.capacity) / 60_000);
+    bucket.at = now;
+  }
+
+  /** Drops buckets that have refilled to capacity: forgetting them changes nothing. */
+  #sweep(now: number): void {
+    for (const [id, bucket] of this.#buckets) {
+      this.#refill(bucket, now);
+      if (bucket.tokens >= bucket.capacity) this.#buckets.delete(id);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Build cap
+
+type Build = {
+  key: string;
+  fn: () => Promise<unknown>;
+  /** While waiting: the latest deadline of the calls attached to it. */
+  deadline: number;
+  started: boolean;
+  promise: Promise<unknown>;
+  resolve: (v: unknown) => void;
+  reject: (e: unknown) => void;
+};
+
+/**
+ * At most `max` graph builds in flight. Calls with the same key share one build and one slot.
+ * A call that reaches its deadline is rejected with `BuildDeadlineError`; a build that has not
+ * started by then never starts, and one that has keeps running and holds its slot and key until it
+ * settles, so a retry attaches to it instead of starting a duplicate build upstream.
+ */
+export class BuildCap implements BuildCapLike {
+  readonly #max: number;
+  readonly #now: () => number;
+  readonly #builds = new Map<string, Build>();
+  readonly #queue: Build[] = [];
+  #active = 0;
+
+  constructor(max: number, now: () => number = Date.now) {
+    this.#max = max;
+    this.#now = now;
+  }
+
+  /** Builds running (holding a slot). */
+  inFlight(): number {
+    return this.#active;
+  }
+
+  run<T>(key: string, fn: () => Promise<T>, deadlineAt: number): Promise<T> {
+    let build = this.#builds.get(key);
+    if (build) {
+      if (!build.started) build.deadline = Math.max(build.deadline, deadlineAt);
+    } else {
+      let resolve!: (v: unknown) => void;
+      let reject!: (e: unknown) => void;
+      const promise = new Promise<unknown>((res, rej) => { resolve = res; reject = rej; });
+      build = { key, fn, deadline: deadlineAt, started: false, promise, resolve, reject };
+      this.#builds.set(key, build);
+      this.#queue.push(build);
+      this.#pump();
+    }
+    return this.#wait(build, deadlineAt) as Promise<T>;
+  }
+
+  #wait(build: Build, deadlineAt: number): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new BuildDeadlineError());
+        this.#expire(build);
+      }, Math.max(0, deadlineAt - this.#now()));
+      build.promise.then(
+        (v) => { clearTimeout(timer); resolve(v); },
+        (e) => { clearTimeout(timer); reject(e); },
+      );
+    });
+  }
+
+  /** Forgets a build that is still waiting once every call attached to it has passed its deadline. */
+  #expire(build: Build): void {
+    if (build.started || build.deadline > this.#now()) return;
+    const i = this.#queue.indexOf(build);
+    if (i >= 0) this.#queue.splice(i, 1);
+    if (this.#builds.get(build.key) === build) this.#builds.delete(build.key);
+  }
+
+  #pump(): void {
+    while (this.#active < this.#max && this.#queue.length) {
+      const build = this.#queue.shift()!;
+      if (build.deadline <= this.#now()) {
+        if (this.#builds.get(build.key) === build) this.#builds.delete(build.key);
+        continue;
+      }
+      this.#start(build);
+    }
+  }
+
+  #start(build: Build): void {
+    build.started = true;
+    this.#active += 1;
+    let running: Promise<unknown>;
+    try {
+      running = Promise.resolve(build.fn());
+    } catch (err) {
+      running = Promise.reject(err);
+    }
+    const release = () => {
+      this.#active -= 1;
+      if (this.#builds.get(build.key) === build) this.#builds.delete(build.key);
+      this.#pump();
+    };
+    running.then(
+      (v) => { release(); build.resolve(v); },
+      (e) => { release(); build.reject(e); },
+    );
+  }
+}
