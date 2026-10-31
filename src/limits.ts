@@ -109,6 +109,9 @@ export const USAGE_SALT_BYTES = 32;
 // ---------------------------------------------------------------------------------------------
 // Caller key
 
+/** Longest caller-IP text parsed: a full IPv4-mapped IPv6 address (45) plus a short zone id. */
+const MAX_IP_CHARS = 64;
+
 /** The eight 16-bit groups of an IPv6 address (zone id dropped), or null. */
 function ipv6Groups(addr: string): number[] | null {
   const bare = addr.replace(/%.*$/, '');
@@ -132,6 +135,8 @@ function ipv6Groups(addr: string): number[] | null {
 /** IPv4 stays as it is; IPv4-mapped IPv6 becomes IPv4; other IPv6 becomes its /64. Null if not an IP. */
 function normalizeIp(raw: string): string | null {
   const addr = raw.trim();
+  // No textual IP (zone id aside) is longer; stops the regexes below from scanning a long header.
+  if (addr.length > MAX_IP_CHARS) return null;
   if (isIP(addr) === 4) return addr;
   const g = ipv6Groups(addr);
   if (!g) return null;

@@ -13,6 +13,10 @@ test('caller_key_rules', () => {
   assert.equal(callerKey(req('10.0.0.5', { 'cf-connecting-ip': ' 203.0.113.7 ' })), '203.0.113.7');
   // An unparseable header falls back to the peer.
   assert.equal(callerKey(req('10.0.0.5', { 'cf-connecting-ip': 'not-an-ip' })), '10.0.0.5');
+  // Over-long values are refused before any parsing (CodeQL js/polynomial-redos).
+  assert.equal(callerKey(req('10.0.0.5', { 'cf-connecting-ip': `::1%${'%'.repeat(8000)}` })), '10.0.0.5');
+  assert.equal(callerKey(req('10.0.0.5', { 'cf-connecting-ip': `::${'9'.repeat(8000)}` })), '10.0.0.5');
+  assert.equal(callerKey(req('10.0.0.5', { 'cf-connecting-ip': `fe80::1%${'z'.repeat(70)}` })), '10.0.0.5');
   // IPv4-mapped IPv6 is IPv4, in either spelling.
   assert.equal(callerKey(req('::ffff:198.51.100.23')), '198.51.100.23');
   assert.equal(callerKey(req('10.0.0.5', { 'cf-connecting-ip': '::FFFF:198.51.100.23' })), '198.51.100.23');
