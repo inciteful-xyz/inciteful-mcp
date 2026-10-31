@@ -31,6 +31,12 @@ export class OpenAlexBudgetExhausted extends Error {
   constructor(readonly retryAfterSecs: number) { super('The OpenAlex request budget is used up for now.'); }
 }
 
+/** A 429 with budget left (or no budget header): OpenAlex's short per-second limit. */
+export class OpenAlexRateLimited extends Error {
+  override readonly name = 'OpenAlexRateLimited';
+  constructor(readonly retryAfterSecs: number) { super('OpenAlex is rate limiting requests.'); }
+}
+
 export class OpenAlexError extends Error {
   override readonly name = 'OpenAlexError';
   constructor(readonly status: number) { super('OpenAlex returned an error.'); }

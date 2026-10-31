@@ -11,7 +11,7 @@ import { OpenAlexClient, type Work } from '../src/openalex.js';
 import type { ContentClient, ReadResult } from '../src/content.js';
 import type { ConnectorResult, GraphClient, SimilarPaper } from '../src/graph.js';
 import {
-  BuildDeadlineError, GraphError, GraphUnavailableError, OpenAlexBudgetExhausted, QueryTimeoutError,
+  BuildDeadlineError, GraphError, GraphUnavailableError, OpenAlexBudgetExhausted, OpenAlexRateLimited, QueryTimeoutError,
 } from '../src/errors.js';
 import type { BuildCapLike, SeedResolution } from '../src/types.js';
 
@@ -776,6 +776,15 @@ test('budget_exhausted_message_has_retry', async () => {
       assert.equal(text(r), 'The OpenAlex request budget is used up for now; retry in about 1234 seconds.');
     }
     assert.deepEqual(settled.map(s => s.outcome), ['upstream_unavailable', 'upstream_unavailable', 'upstream_unavailable']);
+  });
+});
+
+test('openalex_rate_limit_message_has_the_short_retry', async () => {
+  await withClient({ works: async () => { throw new OpenAlexRateLimited(60); } }, async ({ call, settled }) => {
+    const r = await call('get_papers', { ids: ['W1'] });
+    assert.ok(r.isError);
+    assert.equal(text(r), 'OpenAlex is rate limiting; retry in about 60 seconds.');
+    assert.deepEqual(settled.map(s => s.outcome), ['upstream_rate_limited']);
   });
 });
 

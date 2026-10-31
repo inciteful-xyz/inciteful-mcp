@@ -32,7 +32,8 @@ export type UsageRow = {
   clientVersion: string | null;
   callerKey: string;
   durationMs: number;
-  outcome: 'ok' | 'tool_error' | 'rate_limited' | 'upstream_unavailable' | 'timeout';
+  /** `rate_limited`: our own 429 (rejection rows). `upstream_rate_limited`: OpenAlex's short limit. */
+  outcome: 'ok' | 'tool_error' | 'rate_limited' | 'upstream_unavailable' | 'upstream_rate_limited' | 'timeout';
   graphPapers: number | null;
   graphDepth: number | null;
   openalexCalls: number | null;

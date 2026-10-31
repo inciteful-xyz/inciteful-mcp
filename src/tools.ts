@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { bibtexEntries, risEntries } from './citations.js';
 import type { ContentClient, ContentLink } from './content.js';
 import {
-  BuildDeadlineError, GraphError, GraphUnavailableError, OpenAlexBudgetExhausted, OpenAlexError, QueryTimeoutError, TitleFilterError,
+  BuildDeadlineError, GraphError, GraphUnavailableError, OpenAlexBudgetExhausted, OpenAlexError, OpenAlexRateLimited, QueryTimeoutError, TitleFilterError,
 } from './errors.js';
 import type { ConnectorPaper, GraphClient, SimilarPaper } from './graph.js';
 import {
@@ -21,7 +21,7 @@ import { buildTitleMatch, MAX_TERMS } from './titlefilter.js';
 import type { BuildCapLike, GraphMeta, SeedResolution } from './types.js';
 import { createUrls, type CappedUrl, type Urls } from './urls.js';
 
-export type ToolOutcome = 'ok' | 'tool_error' | 'upstream_unavailable' | 'timeout';
+export type ToolOutcome = 'ok' | 'tool_error' | 'upstream_unavailable' | 'upstream_rate_limited' | 'timeout';
 
 /** One per tool call that reaches a handler; Task 6 turns it into a usage row. Carries no request data. */
 export type ToolSettled = {
@@ -76,6 +76,9 @@ function describeError(err: unknown): { message: string; outcome: ToolOutcome } 
   }
   if (err instanceof OpenAlexBudgetExhausted) {
     return { message: `The OpenAlex request budget is used up for now; ${retryIn(err.retryAfterSecs)}.`, outcome: 'upstream_unavailable' };
+  }
+  if (err instanceof OpenAlexRateLimited) {
+    return { message: `OpenAlex is rate limiting; ${retryIn(err.retryAfterSecs)}.`, outcome: 'upstream_rate_limited' };
   }
   if (err instanceof GraphError) return { message: err.message, outcome: 'upstream_unavailable' };
   if (err instanceof OpenAlexError) return { message: 'OpenAlex returned an error; retry shortly.', outcome: 'upstream_unavailable' };

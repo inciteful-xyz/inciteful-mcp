@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { inspect } from 'node:util';
 import { OpenAlexClient, compactWork, countOpenAlexRequests, normalizeId, reconstructAbstract } from '../src/openalex.js';
-import { OpenAlexBudgetExhausted, OpenAlexError } from '../src/errors.js';
+import { OpenAlexBudgetExhausted, OpenAlexError, OpenAlexRateLimited } from '../src/errors.js';
 
 const KEY = 'SENTINEL-OA-KEY-7f3a9c';
 
@@ -193,23 +193,53 @@ test('failed_batch_marks_inputs_unavailable', async () => {
   assert.deepEqual(result.unresolved, [{ input: '10.1/a', reason: 'unavailable' }, { input: 'doi:10.1/b', reason: 'unavailable' }]);
 });
 
-test('works_rethrows_budget_exhaustion_when_nothing_came_back', async () => {
-  const { fetcher } = fake(() => new Response('', { status: 429, headers: { 'Retry-After': '30' } }));
-  await assert.rejects(new OpenAlexClient(KEY, fetcher).works(['W1', '10.1/a']),
-    (err: unknown) => err instanceof OpenAlexBudgetExhausted && err.retryAfterSecs === 30);
+test('works_rethrows_a_refusal_when_nothing_came_back', async () => {
+  const limited = fake(() => new Response('', { status: 429, headers: { 'Retry-After': '30' } }));
+  await assert.rejects(new OpenAlexClient(KEY, limited.fetcher).works(['W1', '10.1/a']),
+    (err: unknown) => err instanceof OpenAlexRateLimited && err.retryAfterSecs === 30);
+  // One batch out of budget, the other only rate limited: the budget wins, it is the longer wait.
+  const mixed = fake(call => filterValues(call, 'doi').length
+    ? new Response('', { status: 429, headers: { 'x-ratelimit-remaining-usd': '0', 'x-ratelimit-reset': '40000' } })
+    : new Response('', { status: 429, headers: { 'Retry-After': '30' } }));
+  await assert.rejects(new OpenAlexClient(KEY, mixed.fetcher).works(['W1', '10.1/a']),
+    (err: unknown) => err instanceof OpenAlexBudgetExhausted && err.retryAfterSecs === 40000);
 });
 
-test('429_maps_to_budget_exhausted_with_retry', async () => {
+/** 23:00 UTC: an hour to the daily reset. */
+const LATE = () => new Date('2026-10-30T23:00:00.000Z');
+
+test('429_with_budget_left_is_a_short_rate_limit', async () => {
+  // As graph-api's budget gate: x-ratelimit-reset is the daily budget's reset, never the wait here.
   const cases: Array<[Record<string, string>, number]> = [
+    [{ 'x-ratelimit-remaining-usd': '0.42', 'x-ratelimit-reset': '40000' }, 60],
+    [{ 'x-ratelimit-remaining-usd': '0.42', 'x-ratelimit-reset': '40000', 'Retry-After': '5' }, 5],
     [{ 'Retry-After': '120', 'x-ratelimit-reset': '2581' }, 120],
-    [{ 'x-ratelimit-reset': '2581' }, 2581],
-    [{}, 3600],
-    [{ 'Retry-After': 'soon' }, 3600],
+    [{ 'x-ratelimit-reset': '2581' }, 60],
+    [{ 'x-ratelimit-remaining-usd': 'n/a' }, 60],
+    [{ 'x-ratelimit-remaining-usd': '0abc' }, 60],
+    [{}, 60],
+    [{ 'Retry-After': 'soon' }, 60],
+    [{ 'Retry-After': '99999' }, 3600],
   ];
   for (const [headers, expected] of cases) {
     const { fetcher } = fake(() => new Response('{"error":"rate limited"}', { status: 429, headers }));
-    await assert.rejects(new OpenAlexClient(KEY, fetcher).search('x', { limit: 1 }),
-      (err: unknown) => err instanceof OpenAlexBudgetExhausted && err.retryAfterSecs === expected);
+    await assert.rejects(new OpenAlexClient(KEY, fetcher, LATE).search('x', { limit: 1 }),
+      (err: unknown) => err instanceof OpenAlexRateLimited && err.retryAfterSecs === expected, JSON.stringify(headers));
+  }
+});
+
+test('budget_spent_only_when_remaining_usd_is_zero_or_less', async () => {
+  const cases: Array<[number, Record<string, string>, number]> = [
+    [429, { 'x-ratelimit-remaining-usd': '0', 'x-ratelimit-reset': '40000' }, 40000],
+    [429, { 'x-ratelimit-remaining-usd': '-0.0001', 'x-ratelimit-reset': '40000', 'Retry-After': '5' }, 40000],
+    [429, { 'x-ratelimit-remaining-usd': '0', 'x-ratelimit-reset': '999999' }, 86400],
+    [429, { 'x-ratelimit-remaining-usd': '0' }, 3600],
+    [403, { 'x-ratelimit-remaining-usd': '0', 'x-ratelimit-reset': '40000' }, 40000],
+  ];
+  for (const [status, headers, expected] of cases) {
+    const { fetcher } = fake(() => new Response('', { status, headers }));
+    await assert.rejects(new OpenAlexClient(KEY, fetcher, LATE).search('x', { limit: 1 }),
+      (err: unknown) => err instanceof OpenAlexBudgetExhausted && err.retryAfterSecs === expected, JSON.stringify(headers));
   }
   const { fetcher } = fake(() => new Response('', { status: 503 }));
   await assert.rejects(new OpenAlexClient(KEY, fetcher).search('x', { limit: 1 }), (err: unknown) => err instanceof OpenAlexError && err.status === 503);
@@ -259,7 +289,7 @@ test('errors_and_inspect_never_contain_key', async () => {
     ...errors.map(e => inspect(e, { showHidden: true, depth: 10 })), ...errors.map(e => JSON.stringify(e))]) {
     assert.equal(String(text).includes(KEY), false, text);
   }
-  assert.ok(errors.every(e => e instanceof OpenAlexError || e instanceof OpenAlexBudgetExhausted));
+  assert.ok(errors.every(e => e instanceof OpenAlexError || e instanceof OpenAlexRateLimited));
 });
 
 test('countOpenAlexRequests counts each request in its own async context', async () => {

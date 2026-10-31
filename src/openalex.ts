@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { inspect } from 'node:util';
 import { z } from 'zod';
-import { OpenAlexBudgetExhausted, OpenAlexError } from './errors.js';
+import { OpenAlexBudgetExhausted, OpenAlexError, OpenAlexRateLimited } from './errors.js';
 
 const WORKS_URL = 'https://api.openalex.org/works';
 /** OpenAlex's cap on OR-values in one filter. */
@@ -9,8 +9,11 @@ const MAX_OR_VALUES = 100;
 /** OpenAlex's `per-page` cap. Works sharing a DOI or PMID can return more rows than values. */
 const MAX_PER_PAGE = 200;
 const REQUEST_TIMEOUT_MS = 30_000;
-/** Fallback wait when a 429 names neither `Retry-After` nor `x-ratelimit-reset`. */
-const DEFAULT_RETRY_SECS = 3600;
+/** Longest budget reset we trust from `x-ratelimit-reset`: the budget resets daily. */
+const MAX_RESET_SECS = 86_400;
+/** Wait after a short rate limit without a usable `Retry-After`, and the longest one we pass on. */
+const DEFAULT_RATE_LIMIT_SECS = 60;
+const MAX_RATE_LIMIT_SECS = 3_600;
 /** Only the fields `compactWork` reads. */
 const SELECT = [
   'id', 'doi', 'title', 'publication_year', 'type', 'is_retracted', 'cited_by_count', 'ids', 'authorships',
@@ -165,12 +168,34 @@ export function compactWork(raw: unknown): Work | null {
   };
 }
 
-function retrySecs(res: Response): number {
-  for (const name of ['retry-after', 'x-ratelimit-reset']) {
-    const value = res.headers.get(name)?.trim();
-    if (value && /^\d+$/.test(value)) return Number(value);
+/** Whole seconds until the next 00:00 UTC, at least 1. */
+function secsToUtcMidnight(now: Date): number {
+  const midnight = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
+  return Math.max(1, Math.ceil((midnight - now.getTime()) / 1000));
+}
+
+const delaySecs = (res: Response, name: string): number | null => {
+  const value = res.headers.get(name)?.trim();
+  return value && /^\d+$/.test(value) ? Number(value) : null;
+};
+
+/**
+ * The refusal a failed response stands for, as graph-api's budget gate reads the same headers: the
+ * budget is spent only when `x-ratelimit-remaining-usd` is 0 or less (wait for `x-ratelimit-reset`,
+ * else midnight UTC). Any other 429 is the short per-second limit: wait `Retry-After`, else 60 s;
+ * `x-ratelimit-reset` is the daily budget's reset and never the wait for it.
+ */
+function refusal(res: Response, now: Date): OpenAlexBudgetExhausted | OpenAlexRateLimited | null {
+  // Number(), not parseFloat: '0abc' is unparseable, as it is to graph-api, not 0.
+  const raw = res.headers.get('x-ratelimit-remaining-usd')?.trim();
+  const remaining = raw ? Number(raw) : Number.NaN;
+  if (remaining <= 0) {
+    const reset = delaySecs(res, 'x-ratelimit-reset');
+    return new OpenAlexBudgetExhausted(reset === null ? secsToUtcMidnight(now) : Math.min(reset, MAX_RESET_SECS));
   }
-  return DEFAULT_RETRY_SECS;
+  if (res.status !== 429) return null;
+  const retryAfter = delaySecs(res, 'retry-after');
+  return new OpenAlexRateLimited(retryAfter === null ? DEFAULT_RATE_LIMIT_SECS : Math.min(retryAfter, MAX_RATE_LIMIT_SECS));
 }
 
 function chunks<T>(items: T[], size: number): T[][] {
@@ -189,10 +214,12 @@ type Page = { works: Work[]; count: number | null; nextCursor: string | null };
 export class OpenAlexClient {
   readonly #key: string;
   readonly #fetch: typeof fetch;
+  readonly #now: () => Date;
 
-  constructor(key: string, fetcher: typeof fetch = fetch) {
+  constructor(key: string, fetcher: typeof fetch = fetch, now: () => Date = () => new Date()) {
     this.#key = key;
     this.#fetch = fetcher;
+    this.#now = now;
   }
 
   [inspect.custom]() { return 'OpenAlexClient {}'; }
@@ -217,13 +244,9 @@ export class OpenAlexClient {
     } catch {
       throw new OpenAlexError(0);
     }
-    if (res.status === 429) {
-      await res.body?.cancel();
-      throw new OpenAlexBudgetExhausted(retrySecs(res));
-    }
     if (!res.ok) {
       await res.body?.cancel();
-      throw new OpenAlexError(res.status);
+      throw refusal(res, this.#now()) ?? new OpenAlexError(res.status);
     }
     let body: unknown;
     try { body = await res.json(); } catch { throw new OpenAlexError(res.status); }
@@ -262,13 +285,16 @@ export class OpenAlexClient {
 
     const found = new Map<string, Work>();
     const failed = new Set<string>();
-    let budget: OpenAlexBudgetExhausted | null = null;
+    let refused: OpenAlexBudgetExhausted | OpenAlexRateLimited | null = null;
     for (const [i, outcome] of settled.entries()) {
       const { kind, group } = batches[i];
       if (outcome.status === 'fulfilled') {
         for (const work of outcome.value.works) for (const key of workKeys(work)) found.set(key, work);
       } else {
-        if (outcome.reason instanceof OpenAlexBudgetExhausted) budget = outcome.reason;
+        // A spent budget outranks a short rate limit: it is the longer wait.
+        const reason = outcome.reason;
+        if (reason instanceof OpenAlexBudgetExhausted) refused = reason;
+        else if (reason instanceof OpenAlexRateLimited && !(refused instanceof OpenAlexBudgetExhausted)) refused = reason;
         for (const value of group) failed.add(`${kind}:${value}`);
       }
     }
@@ -280,8 +306,8 @@ export class OpenAlexClient {
       if (work) works.set(work.id, work);
       else unresolved.push({ input: ids[i], reason: p && failed.has(`${p.kind}:${p.value}`) ? 'unavailable' : 'not_found' });
     }
-    // Out of budget with nothing to show: the caller needs the retry time, not a list of `unavailable`.
-    if (budget && !works.size) throw budget;
+    // Refused with nothing to show: the caller needs the retry time, not a list of `unavailable`.
+    if (refused && !works.size) throw refused;
     return { works: [...works.values()], unresolved };
   }
 
