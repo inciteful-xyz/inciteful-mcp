@@ -12,7 +12,7 @@ import {
 import type { ConnectorPaper, GraphClient, SimilarPaper } from './graph.js';
 import {
   GRACE_MS, MAX_ANALYSIS_LIMIT, MAX_ID_CHARS, MAX_PAPER_IDS, MAX_QUERY_CHARS, MAX_READ_CHARS, MAX_SEARCH_LIMIT, MAX_SEEDS, MAX_SQL_CHARS, MAX_SQL_LIMIT,
-  METADATA_WAIT_MS, OUTPUT_CAP_BYTES, TOOL_CEILING_MS, URL_SEED_CAP,
+  METADATA_WAIT_MS, OUTPUT_CAP_BYTES, TOOL_CEILING_MS, URL_SEED_CAP, type ToolName,
 } from './limits.js';
 import { countOpenAlexRequests, type OpenAlexClient, type Work } from './openalex.js';
 import { capResult } from './output.js';
@@ -171,8 +171,7 @@ const outputs = {
     format: z.enum(['bibtex', 'ris']), rows: z.array(z.object({ openalex_id: z.string(), doi: z.string().nullable(), entry: z.string() })),
     unresolved: unresolvedSchema, ...common,
   }),
-};
-type ToolName = keyof typeof outputs;
+} satisfies Record<ToolName, z.ZodType>;
 
 // ---------------------------------------------------------------------------------------------
 // Inputs

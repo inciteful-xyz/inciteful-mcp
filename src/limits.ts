@@ -1,6 +1,13 @@
 // Limits and constants for the hosted server (plan Global Constraints). Task 6 adds the rate limiter
 // and the build cap classes to this file.
 
+/** The eight tool names. `tools.ts` registers exactly these; the usage log stores any other name as NULL. */
+export const TOOL_NAMES = [
+  'search_literature', 'get_papers', 'find_similar_papers', 'explore_citation_network',
+  'connect_papers', 'query_citation_graph', 'read_paper', 'export_citations',
+] as const;
+export type ToolName = (typeof TOOL_NAMES)[number];
+
 /** Ceiling on one tool call. The graph call behind a timed-out tool call keeps running upstream. */
 export const TOOL_CEILING_MS = 90_000;
 /**
@@ -79,3 +86,8 @@ export const OPENAI_RANGES: readonly string[] = [
 
 /** Every vendor range; each range gets its own shared bucket. */
 export const VENDOR_RANGES: readonly string[] = [...ANTHROPIC_RANGES, ...OPENAI_RANGES];
+
+/** Usage rows older than this are purged. */
+export const USAGE_RETENTION_DAYS = 90;
+/** Random bytes in the daily `ip_hash` salt. */
+export const USAGE_SALT_BYTES = 32;
