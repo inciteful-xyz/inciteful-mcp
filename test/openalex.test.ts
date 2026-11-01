@@ -48,11 +48,11 @@ const imagenet = {
   abstract_inverted_index: { We: [0], trained: [1], a: [2], 'large,': [3], deep: [4], convolutional: [5] },
 };
 
-test('normalizes DOI, OpenAlex, and PMID URLs without conflating numeric IDs', () => {
+test('normalizes DOI, OpenAlex, and PMID URLs; a bare number is a PMID', () => {
   assert.equal(normalizeId(' https://doi.org/10.1234/ABC '), '10.1234/ABC');
   assert.equal(normalizeId('https://openalex.org/w123'), 'W123');
   assert.equal(normalizeId('https://pubmed.ncbi.nlm.nih.gov/42/'), 'pmid:42');
-  assert.equal(normalizeId('42'), '42');
+  assert.equal(normalizeId(' 29456894 '), 'pmid:29456894');
 });
 
 test('reconstructs abstract positions and repeated tokens without relying on key order', () => {
@@ -178,10 +178,11 @@ test('maps_results_back_by_normalized_key', async () => {
     if (filterValues(call, 'pmcid').length) return page([raw('W12', { ids: { pmcid: 'https://www.ncbi.nlm.nih.gov/pmc/articles/123' } })]);
     return page([raw('W7')]);
   });
-  const inputs = ['pmid:42', '10.1/ABC', 'https://openalex.org/w7', 'PMC123', 'https://doi.org/10.1/abc', '10.9/missing'];
+  const inputs = ['pmid:42', '10.1/ABC', 'https://openalex.org/w7', 'PMC123', 'https://doi.org/10.1/abc', '10.9/missing', '42'];
   const result = await new OpenAlexClient(KEY, fetcher).works(inputs);
   assert.deepEqual(filterValues(calls.find(c => filterValues(c, 'doi').length)!, 'doi'), ['10.1/abc', '10.9/missing']);
-  // Input order; the DOI given twice in different forms yields one work.
+  assert.deepEqual(filterValues(calls.find(c => filterValues(c, 'pmid').length)!, 'pmid'), ['42']);
+  // Input order; the DOI, and the PMID, given twice in different forms yield one work each.
   assert.deepEqual(result.works.map(w => w.id), ['W11', 'W10', 'W7', 'W12']);
   assert.deepEqual(result.unresolved, [{ input: '10.9/missing', reason: 'not_found' }]);
 });

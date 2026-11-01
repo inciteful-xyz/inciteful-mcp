@@ -156,6 +156,14 @@ test('resolve_batches_at_100_in_order', async () => {
   assert.deepEqual(result.results[1], { input: 'W2', id: 'W2', reason: null });
 });
 
+test('resolve_sends_a_bare_number_as_a_pmid_and_echoes_the_input', async () => {
+  // graph-api reads a bare number as a MAG id: "29456894" resolved to an unrelated 2016 paper.
+  const { fetcher, calls } = fake(call => json(call.url.searchParams.getAll('ids[]').map(input => ({ input, id: 'W1', reason: null }))));
+  const result = await new GraphClient(cfg, fetcher).resolve(['29456894', 'W2']);
+  assert.deepEqual(calls[0].url.searchParams.getAll('ids[]'), ['pmid:29456894', 'W2']);
+  assert.deepEqual(result.results.map(r => r.input), ['29456894', 'W2']);
+});
+
 test('resolve_empty_makes_one_request_without_ids', async () => {
   const { fetcher, calls } = fake(() => json([], { 'X-Graph-Snapshot': '2026-10-15' }));
   const graph = new GraphClient(cfg, fetcher);
