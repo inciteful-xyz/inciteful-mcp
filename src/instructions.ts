@@ -9,7 +9,7 @@ export const INSTRUCTIONS = [
   '1. No seeds yet: search_literature (live OpenAlex keyword search) to find candidates. Propose 3-5 well-cited, on-topic seeds and confirm them with the user (title, year, DOI).',
   '2. find_similar_papers for a quick look (seconds).',
   '3. explore_citation_network for important, reviews and recent, plus references and citations. A new graph can take about a minute; if a call says it is still working, repeat the same call, which joins the running build.',
-  '4. Snowball: add confirmed new papers as seeds and rerun until a round adds nothing new. Say how many rounds you ran and why you stopped.',
+  '4. Snowball: show the user each round\'s new candidates and add as seeds just the papers they confirm as relevant. Stop when a round turns up no new relevant papers, or after 3 rounds, then ask before going further. Say how many rounds you ran and why you stopped.',
   '5. get_papers before citing: read the abstracts, check is_retracted and preprint vs published (graph rows carry no retraction flag), and merge duplicate versions of one work.',
   '',
   'Honesty:',

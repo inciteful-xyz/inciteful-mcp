@@ -1,6 +1,5 @@
 // The landing page at /academic/mcp (spec §4.8, layout A): install first, everything else below.
 
-import { coverageNote } from '../provenance.js';
 import type { PageCtx } from '../types.js';
 import { EXAMPLE } from './example.js';
 import { esc, GITHUB_URL, links, ORGANIZATION_ID, shell, WEBSITE_ID, type Links } from './layout.js';
@@ -185,7 +184,6 @@ export const COPY_SCRIPT = `(function(){var b=document.getElementById('copy'),u=
 
 export function landing(ctx: PageCtx): string {
   const l = links(ctx);
-  const snapshot = ctx.snapshot === null ? '<b>Graph snapshot date unavailable</b>.' : `<b>Graph snapshot: ${esc(ctx.snapshot)}</b>.`;
   const body = `<section class="hero"><div class="wrap">
 <h1>${H1}</h1>
 <p class="sub">Connect Claude, ChatGPT, Cursor or any MCP client to Inciteful. It snowballs from seed papers, finds the important and review papers around them, and traces the paths between two papers. It’s free, needs no login, and runs on open OpenAlex data.</p>
@@ -232,7 +230,7 @@ ${example()}
 <section class="sec alt"><div class="wrap">
 <h2>Data, coverage and limits</h2>
 <ul class="plain">
-<li>${snapshot} ${esc(coverageNote(ctx.snapshot, ctx.recentTier))}</li>
+<li><b>Coverage:</b> The graph is updated nightly with new papers that have a Crossref DOI. Other new papers are looked up live when you name them, but don’t appear as neighbours in the graph. Each result’s provenance records the dates of the data it used.</li>
 <li><b>Title filters match paper titles only</b> (not abstracts or full text), with Porter stemming. The tools say so, so your assistant won’t over-filter.</li>
 <li>Very highly cited papers aren’t expanded, which keeps graphs a usable size. When that happens, the result says how many.</li>
 <li><b>Licences:</b> metadata is OpenAlex CC0; full text from PubMed Central carries each article’s own licence, which the result names.</li>
@@ -265,7 +263,7 @@ ${example()}
 <details><summary>Why is it on a medical domain?</summary><p>Inciteful Academic moved to incitefulmed.com/academic, next to <a href="${esc(l.site)}">Inciteful Med</a>. The graph covers every field in OpenAlex, not just medicine.</p></details>
 <details><summary>Which assistants work?</summary><p>Claude (web, desktop, mobile and Claude Code), ChatGPT where your plan allows custom MCP servers, Cursor, VS Code, and any client that supports remote MCP over Streamable HTTP.</p></details>
 <details><summary>My assistant didn’t use Inciteful.</summary><p>Name it in your prompt, for example “Using Inciteful…”. Assistants often default to web search.</p></details>
-<details><summary>Why are some recent papers missing?</summary><p>${esc(coverageNote(ctx.snapshot, ctx.recentTier))}</p></details>
+<details><summary>Why are some recent papers missing?</summary><p>The graph is updated nightly with new papers that have a Crossref DOI. Other new papers are looked up live when you name them, but don’t appear as neighbours in the graph. Each result’s provenance records the dates of the data it used.</p></details>
 <details><summary>Why did I hit a rate limit?</summary><p>Every Claude user shares one rate-limit bucket, because Claude’s requests reach us from Anthropic’s servers; the same goes for ChatGPT and OpenAI’s servers. If you see a rate-limit error, wait a minute and retry.</p></details>
 <details><summary>What happens if the service is down?</summary><p>If the server is down, so is the search. The MCP server runs as a single service with no standby, so your assistant will report a connection error until it’s back; try again a little later.</p></details>
 <details><summary>Is it open source?</summary><p>The server is, under the MIT licence, <a href="${GITHUB_URL}">on GitHub</a>. It calls Inciteful’s hosted graph service to build citation graphs, and that service isn’t part of the repository.</p></details>

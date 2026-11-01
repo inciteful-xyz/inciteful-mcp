@@ -940,7 +940,7 @@ test('prompt_requires_topic_or_seeds', async () => {
       '2. run `find_similar_papers`;',
       '3. propose 3–5 seeds and wait for the user to confirm them (a checkpoint);',
       '4. run `explore_citation_network` for `important`, `reviews` and `recent`, plus `references` and `citations` on the confirmed seeds;',
-      '5. add newly confirmed papers as seeds and repeat step 4 until a round adds nothing new; report the rounds and why you stopped;',
+      '5. show the user the new candidates, add as seeds just the papers they confirm as relevant, and repeat step 4; stop when a round turns up no new relevant papers, or after 3 rounds, then ask before going further; report the rounds and why you stopped;',
       '6. with `get_papers`, fetch the finalists\' abstracts, check retraction and preprint status, and merge duplicate versions of one work;',
       '7. only then write: cite every paper by DOI and append the provenance.',
       'Keep a search log (tool, query, seeds or SQL, filters, retrieved_at, graph_snapshot, counts) and offer it as a methods appendix whose fields map to PRISMA-S and TARCiS.',

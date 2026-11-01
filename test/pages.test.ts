@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { EXAMPLE } from '../src/pages/example.js';
 import { pages } from '../src/pages/index.js';
 import type { PageCtx } from '../src/types.js';
-import { ALLOWED, allCopy, copyRuleHit, decode, scripts, visibleText } from './copyrules.js';
+import { allCopy, copyRuleHit, decode, scripts, visibleText } from './copyrules.js';
 
 const BASE = new URL('https://incitefulmed.com/academic/mcp');
 const ctx = (snapshot: string | null, recentTier: string | null): PageCtx => ({ publicBaseUrl: BASE, snapshot, recentTier });
@@ -54,9 +54,8 @@ test('copy_rules_all_pages', () => {
     const hit = copyRuleHit(allCopy(html));
     assert.equal(hit, null, `${name}: "${hit}"`);
   }
-  // The allowlist is used: the landing page carries both phrases.
-  const landing = visibleText(pages.landing(CTX));
-  for (const phrase of ALLOWED) assert.ok(landing.includes(phrase), phrase);
+  // The allowlist is used: the landing page carries "titles only"; the instructions carry the other phrase.
+  assert.ok(visibleText(pages.landing(CTX)).includes('titles only'));
 });
 
 test('jsonld_valid_and_fields', () => {
@@ -101,23 +100,19 @@ test('client_panels_static', () => {
   assert.equal(scripts(html).some(s => /panel/.test(s.body)), false);
 });
 
-test('coverage_text_both_states_and_distinct_dates', () => {
-  const live = visibleText(pages.landing(ctx('2026-10-15', '2026-11-02')));
-  assert.ok(live.includes('Snapshot 2026-10-15, updated nightly through 2026-11-02 with new papers that have a Crossref DOI. Other new papers are looked up live only when named.'));
-  assert.ok(live.includes('Graph snapshot: 2026-10-15'));
-  const notLive = visibleText(pages.landing(ctx('2026-10-15', null)));
-  assert.ok(notLive.includes("The graph is built from the snapshot. Papers newer than the snapshot are looked up live only when named explicitly; they don't appear as neighbours."));
-  assert.equal(notLive.includes('updated nightly'), false);
-  assert.equal(notLive.includes('2026-11-02'), false);
+test('coverage_text_has_no_dates', () => {
+  // The recent tier changes nightly, so the page describes coverage without dates; results carry them.
+  const cov = 'The graph is updated nightly with new papers that have a Crossref DOI. Other new papers are looked up live when you name them, but don’t appear as neighbours in the graph. Each result’s provenance records the dates of the data it used.';
+  for (const html of [pages.landing(ctx('2031-01-01', '2031-01-02')), pages.landing(ctx(null, null))]) {
+    const text = visibleText(html);
+    assert.equal(text.split(cov).length - 1, 2, 'coverage bullet and FAQ');
+    assert.equal(/2031-01-0[12]|\bsnapshot/i.test(text), false);
+  }
 });
 
-test('snapshot_unavailable_and_escaped', () => {
-  const missing = visibleText(pages.landing(ctx(null, null)));
-  assert.ok(missing.includes('Graph snapshot date unavailable'));
-  assert.equal(missing.includes('Graph snapshot: snapshot date unavailable'), false);
+test('hostile_ctx_escaped', () => {
   const hostile = pages.landing(ctx('<b>2026</b>', '"><script>x</script>'));
   assert.equal(hostile.includes('<b>2026</b>'), false);
-  assert.ok(hostile.includes('&lt;b&gt;2026&lt;/b&gt;'));
   assert.equal(hostile.includes('<script>x</script>'), false);
   const hostileBase = pages.landing({ publicBaseUrl: new URL('https://example.org/a"b<c>/mcp'), snapshot: null, recentTier: null });
   assert.equal(/href="[^"]*"b/.test(hostileBase), false);
