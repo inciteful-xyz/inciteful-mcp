@@ -26,6 +26,8 @@ const RESOLVE_TIMEOUT_MS = 30_000;
 const resolutionSchema = z.array(z.object({
   input: z.string(), id: z.string().nullable(), reason: z.enum(['not_found', 'unavailable']).nullable(),
 }));
+/** graph-api reads a bare number as a MAG id; the tools take it as a PMID. */
+const graphInput = (input: string) => (/^\d+$/.test(input) ? `pmid:${input}` : input);
 const paperSchema = z.object({ id: z.string(), title: z.string().nullable().optional() }).passthrough();
 const rowsSchema = z.array(z.record(z.string(), z.unknown()));
 const connectorSchema = z.object({
@@ -146,9 +148,11 @@ export class GraphClient {
     const answers = await Promise.all(batches.map(batch => {
       const timeout = AbortSignal.timeout(RESOLVE_TIMEOUT_MS);
       const signal = opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout;
-      return this.#json(resolutionSchema, 'openalex/resolve', withIds(batch), { signal }, opts.signal);
+      return this.#json(resolutionSchema, 'openalex/resolve', withIds(batch.map(graphInput)), { signal }, opts.signal);
     }));
-    return { results: answers.flatMap(a => a.data), ...answers[answers.length - 1].meta };
+    // Echo what the caller sent, not the `pmid:` form.
+    const results = answers.flatMap(a => a.data).map((r, i) => r.input === graphInput(inputs[i] ?? '') ? { ...r, input: inputs[i] } : r);
+    return { results, ...answers[answers.length - 1].meta };
   }
 
   /** graph-api's fast similarity, in its order (descending score; seeds and score-0 rows at the tail). */

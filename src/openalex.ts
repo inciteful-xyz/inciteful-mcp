@@ -83,6 +83,8 @@ export function normalizeId(input: string): string {
   const value = input.trim().replace(/^https?:\/\/(?:dx\.)?doi\.org\//i, '')
     .replace(/^doi:\s*/i, '').replace(/^https?:\/\/openalex\.org\//i, '');
   if (/^w\d+$/i.test(value)) return value.toUpperCase();
+  // The tools take PMIDs, and models often send them as bare numbers.
+  if (/^\d+$/.test(value)) return `pmid:${value}`;
   const pmid = value.match(/^https?:\/\/pubmed\.ncbi\.nlm\.nih\.gov\/(\d+)\/?$/i);
   return pmid ? `pmid:${pmid[1]}` : value;
 }
