@@ -245,7 +245,7 @@ ${example()}
 <li>No account, no sign-in and no cookies.</li>
 <li>Our usage log keeps, for 90 days, one row per tool call: the tool name, your client’s name and version, how long it took, the outcome and the graph size. Your IP address is stored as a hash with a salt that changes every day. The usage log holds no queries, paper IDs or raw IP addresses.</li>
 <li>Our graph service’s own logs may contain the paper IDs and queries it processes. We keep them for up to 15 days, with no IP addresses.</li>
-<li>Data goes to Cloudflare (network), OpenAlex (search terms and IDs), NCBI (full text), Sentry (our graph service’s error and performance monitoring: request addresses that may include paper IDs, no IP addresses, kept up to 90 days) and your assistant’s vendor, under its own policy.</li>
+<li>Data goes to Cloudflare (network), OpenAlex (search terms and IDs), NCBI (full text), Sentry (error reports from this server and our graph service’s monitoring, which may include paper IDs, no IP addresses, kept up to 90 days) and your assistant’s vendor, under its own policy.</li>
 <li>Don’t put personal or health details in your prompts.</li>
 </ul>
 <p class="muted"><a href="${esc(l.privacy)}">Full privacy policy</a> · <a href="${esc(l.terms)}">Terms</a></p>

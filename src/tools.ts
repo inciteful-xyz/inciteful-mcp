@@ -43,6 +43,8 @@ export type ToolDeps = {
   publicBaseUrl: URL;
   now: () => Date;
   onToolSettled?: (e: ToolSettled) => void;
+  /** An error no other branch of `describeError` knew: a bug, for error reporting. */
+  onUnexpectedError?: (err: unknown, tool: string) => void;
 };
 
 const ANNOTATIONS = { readOnlyHint: true, destructiveHint: false, openWorldHint: true, idempotentHint: true } as const;
@@ -73,9 +75,10 @@ const retryIn = (secs: number | null) => (secs === null ? 'retry shortly' : `ret
 /**
  * Maps any thrown value to a message for the client and an outcome. Messages are fixed strings or our
  * own text (`ToolFailure`, which for `query_citation_graph` may carry graph-api's error about the
- * caller's own SQL). Nothing here carries a URL or a key, and nothing is logged.
+ * caller's own SQL). Nothing here carries a URL or a key, and nothing is logged; the last branch is
+ * a bug, flagged `unexpected` for error reporting.
  */
-function describeError(err: unknown, now: Date): { message: string; outcome: ToolOutcome } {
+function describeError(err: unknown, now: Date): { message: string; outcome: ToolOutcome; unexpected?: true } {
   if (err instanceof ToolFailure) return { message: err.message, outcome: err.outcome };
   if (err instanceof TitleFilterError) return { message: err.message, outcome: 'tool_error' };
   if (err instanceof QueryTimeoutError) {
@@ -97,7 +100,7 @@ function describeError(err: unknown, now: Date): { message: string; outcome: Too
   }
   if (err instanceof GraphError) return { message: err.message, outcome: 'upstream_unavailable' };
   if (err instanceof OpenAlexError) return { message: 'OpenAlex returned an error; retry shortly.', outcome: 'upstream_unavailable' };
-  return { message: 'The tool failed unexpectedly.', outcome: 'tool_error' };
+  return { message: 'The tool failed unexpectedly.', outcome: 'tool_error', unexpected: true };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -459,9 +462,14 @@ export function createServerFactory(deps: ToolDeps): McpServerFactory {
           result = { content: [{ type: 'text', text: JSON.stringify(value) }], structuredContent: value };
           outcome = 'ok';
         } catch (err) {
-          const { message, outcome: o } = ac.signal.aborted ? { message: DEADLINE_MESSAGE, outcome: 'timeout' as const } : describeError(err, deps.now());
+          const { message, outcome: o, unexpected } = ac.signal.aborted
+            ? { message: DEADLINE_MESSAGE, outcome: 'timeout' as const, unexpected: undefined }
+            : describeError(err, deps.now());
           result = { content: [{ type: 'text', text: message }], isError: true };
           outcome = o;
+          if (unexpected) {
+            try { deps.onUnexpectedError?.(err, name); } catch { /* Reporting must never change a tool result. */ }
+          }
         } finally {
           clearTimeout(timer);
         }

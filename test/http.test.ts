@@ -20,6 +20,7 @@ const PROD_HOST = 'incitefulmed.com';
 const config = loadConfig({
   GRAPH_API_PRIMARY_URL: 'http://graph-api-academic', GRAPH_API_SECONDARY_URL: 'http://graph-api',
   OPENALEX_ACADEMIC_API_KEY: 'test-key', PUBLIC_BASE_URL: `https://${PROD_HOST}/academic/mcp`, USAGE_DB_PATH: '/nonexistent/usage.sqlite',
+  SENTRY_DSN: 'https://publickey@o1.ingest.sentry.invalid/42', GIT_SHA: 'test',
 });
 
 const ALLOW_HEADERS = 'content-type, accept, mcp-protocol-version, mcp-method, mcp-name, last-event-id';
@@ -695,4 +696,24 @@ test('page_assets_are_allowlisted_and_present', () => {
   }
   assert.deepEqual([...referenced].sort(), ['battambang-latin-400-normal.woff2', 'dm-sans-latin-ext-wght-normal.woff2', 'dm-sans-latin-wght-normal.woff2', 'favicon.svg', 'icon.png', 'logo-300.png', 'og.png']);
   for (const name of referenced) assert.ok(Object.hasOwn(ASSETS, name), name);
+});
+
+test('a_route_that_throws_is_reported_and_answers_500', async () => {
+  const boom = new Error('page render failed');
+  const throwing = () => { throw boom; };
+  const pages: Pages = { landing: throwing, privacy: throwing, terms: throwing, notFound: throwing };
+  const reported: Array<[unknown, string]> = [];
+  const mcp = { async fetch() { return new Response('{}'); }, async close() {} } as unknown as McpHttpHandler;
+  const limiter = { check: () => ({ ok: true, retryAfterSecs: 0 }) } as unknown as RateLimiter;
+  const usage = { record() {}, recordRejection() {}, close() {} };
+  const app = createApp({
+    config, mcp, pages, graphMeta: () => ({ snapshot: null, recentTier: null }), limiter, usage, assetsDir: tmpdir(),
+    onUnexpectedError: (err, where) => { reported.push([err, where]); },
+  });
+  const server = await serve(app);
+  try {
+    const r = await raw(server.port, 'GET', '/academic/mcp', { accept: 'text/html' });
+    assert.equal(r.status, 500);
+    assert.deepEqual(reported, [[boom, 'route']]);
+  } finally { await server.close(); }
 });

@@ -158,3 +158,10 @@ test('privacy_lists_recipients_and_contact', () => {
     'Retention and deletion', 'Your choices', 'How this relates to the site-wide policy', 'Effective date and version', 'Contact',
   ]);
 });
+
+test('privacy_and_landing_disclose_this_servers_error_reports', () => {
+  // src/sentry.ts sends this server's errors to Sentry; both pages must say so.
+  assert.match(pages.privacy(CTX), /Error reports from this server, sent to Sentry/);
+  assert.match(pages.privacy(CTX), /Sentry<\/b> \(error reports from this server/);
+  assert.match(pages.landing(CTX), /Sentry \(error reports from this server/);
+});

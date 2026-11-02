@@ -10,6 +10,8 @@ const ENV = {
   OPENALEX_ACADEMIC_API_KEY: 'sk-SENTINELC-key',
   PUBLIC_BASE_URL: 'https://SENTINELD.example.org/academic/mcp',
   USAGE_DB_PATH: '/nonexistent/SENTINELE/usage.sqlite',
+  SENTRY_DSN: 'https://SENTINELF@o1.ingest.sentry.invalid/42',
+  GIT_SHA: 'SENTINELG',
 };
 
 function run(env: Record<string, string>): Promise<{ code: number | null; stdout: string; stderr: string }> {
@@ -29,7 +31,7 @@ function run(env: Record<string, string>): Promise<{ code: number | null; stdout
 }
 
 test('startup_fails_naming_only_the_missing_var', async () => {
-  for (const missing of ['OPENALEX_ACADEMIC_API_KEY', 'USAGE_DB_PATH']) {
+  for (const missing of ['OPENALEX_ACADEMIC_API_KEY', 'USAGE_DB_PATH', 'SENTRY_DSN', 'GIT_SHA']) {
     const env: Record<string, string> = { ...ENV };
     delete env[missing];
     const { code, stdout, stderr } = await run(env);
