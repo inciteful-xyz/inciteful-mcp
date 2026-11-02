@@ -105,6 +105,8 @@ export type AppDeps = {
   limiter: Pick<RateLimiter, 'check'>;
   usage: UsageSink & { recordRejection(k: string): void };
   assetsDir: string;
+  /** A route that threw: a bug, for error reporting (src/sentry.ts scrubs request data). */
+  onUnexpectedError?: (err: unknown, where: string) => void;
 };
 
 /** http: origins allowed besides https: ones, on any port: MCP Inspector and other local tools. */
@@ -266,8 +268,9 @@ export function createApp(deps: AppDeps): (req: IncomingMessage, res: ServerResp
   }
 
   return (req, res) => {
-    route(req, res).catch(() => {
-      // No logging: the error could carry request data. Answer if we still can.
+    route(req, res).catch(err => {
+      // No logging: the error could carry request data. Error reporting scrubs it. Answer if we still can.
+      try { deps.onUnexpectedError?.(err, 'route'); } catch { /* Reporting must never change a response. */ }
       if (!res.headersSent) sendOther(req, res, 500, { 'Content-Type': 'text/plain; charset=utf-8' }, 'Internal Server Error');
       else res.destroy();
     });

@@ -11,9 +11,11 @@ const valid = (): NodeJS.ProcessEnv => ({
   OPENALEX_ACADEMIC_API_KEY: SENTINEL,
   PUBLIC_BASE_URL: 'https://incitefulmed.com/academic',
   USAGE_DB_PATH: '/data/usage.sqlite',
+  SENTRY_DSN: 'https://publickey@o1.ingest.sentry.invalid/42',
+  GIT_SHA: 'abc1234',
 });
 
-const NAMES = ['GRAPH_API_PRIMARY_URL', 'GRAPH_API_SECONDARY_URL', 'OPENALEX_ACADEMIC_API_KEY', 'PUBLIC_BASE_URL', 'USAGE_DB_PATH'];
+const NAMES = ['GRAPH_API_PRIMARY_URL', 'GRAPH_API_SECONDARY_URL', 'OPENALEX_ACADEMIC_API_KEY', 'PUBLIC_BASE_URL', 'USAGE_DB_PATH', 'SENTRY_DSN', 'GIT_SHA'];
 
 test('loads a valid environment', () => {
   const config = loadConfig(valid());
@@ -22,6 +24,8 @@ test('loads a valid environment', () => {
   assert.equal(config.openalexKey, SENTINEL);
   assert.equal(config.publicBaseUrl.href, 'https://incitefulmed.com/academic');
   assert.equal(config.usageDbPath, '/data/usage.sqlite');
+  assert.equal(config.sentryDsn, 'https://publickey@o1.ingest.sentry.invalid/42');
+  assert.equal(config.gitSha, 'abc1234');
 });
 
 test('fails_on_each_missing_var', () => {
@@ -77,4 +81,16 @@ test('key_never_in_errors_or_inspection', () => {
   assert.doesNotMatch(String(config), new RegExp(SENTINEL));
   assert.doesNotMatch(`${config}`, new RegExp(SENTINEL));
   assert.doesNotMatch(JSON.stringify({ ...config }), new RegExp(SENTINEL));
+});
+
+test('rejects_a_sentry_dsn_that_is_not_one_without_echoing_it', () => {
+  for (const bad of [
+    'not a url', 'http://key@o1.ingest.sentry.io/42', 'https://o1.ingest.sentry.io/42', 'https://key:pw@o1.ingest.sentry.io/42',
+    'https://key@o1.ingest.sentry.io/', 'https://key@o1.ingest.sentry.io/abc', 'https://key@o1.ingest.sentry.io/42?x=1',
+  ]) {
+    assert.throws(() => loadConfig({ ...valid(), SENTRY_DSN: bad }), (error: Error) => {
+      assert.equal(error.message, 'SENTRY_DSN must be a Sentry DSN (https://<key>@<host>/<project>)', bad);
+      return true;
+    });
+  }
 });

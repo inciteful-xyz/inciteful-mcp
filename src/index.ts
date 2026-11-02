@@ -1,5 +1,6 @@
 // Entry point: SIGTERM/SIGINT drain, config, clients, usage log, MCP handler, HTTP server on 0.0.0.0:8080.
 // Output is startup lines and fixed warnings only; nothing here prints request data or config values.
+// Unexpected errors go to Sentry (src/sentry.ts), without request data.
 
 import { readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
@@ -12,6 +13,7 @@ import { createApp, recordToolCalls, shutdown, trackInFlight, type Stoppable } f
 import { BUILD_CAP, BuildCap, RATE_LIMIT_PER_MINUTE, RateLimiter, VENDOR_RANGES, VENDOR_RATE_LIMIT_PER_MINUTE } from './limits.js';
 import { OpenAlexClient } from './openalex.js';
 import { pages } from './pages/index.js';
+import { initErrorReporting } from './sentry.js';
 import { createServerFactory } from './tools.js';
 import { errorKind, UsageLog } from './usage.js';
 
@@ -45,6 +47,9 @@ try {
   process.exit(1);
 }
 
+// Right after config, so later startup failures and crashes are reported too.
+const errors = initErrorReporting(config.sentryDsn, config.gitSha);
+
 const graph = new GraphClient(config);
 const openalex = new OpenAlexClient(config.openalexKey);
 const content = new ContentClient();
@@ -63,15 +68,16 @@ const limiter = new RateLimiter({
 });
 const factory = createServerFactory({
   graph, openalex, content, buildCap, version: VERSION, publicBaseUrl: config.publicBaseUrl, now: () => new Date(),
-  onToolSettled: recordToolCalls(usage),
+  onToolSettled: recordToolCalls(usage), onUnexpectedError: errors.report,
 });
 const handler = createMcpHandler(factory, { responseMode: 'sse', keepAliveMs: 15_000 });
 
 const tracked = trackInFlight(createApp({
   config, mcp: handler, pages, graphMeta: () => graph.lastMeta, limiter, usage, assetsDir: ASSETS_DIR,
+  onUnexpectedError: errors.report,
 }));
 const server = createServer(tracked.listener);
-stoppable = { server, tracked, close: async () => { await handler.close().catch(() => {}); usage.close(); } };
+stoppable = { server, tracked, close: async () => { await handler.close().catch(() => {}); usage.close(); await errors.close(); } };
 server.listen(PORT, HOST, () => {
   console.log(`inciteful-mcp ${VERSION} listening on ${HOST}:${PORT}`);
   // Only fills the pages' snapshot date (a tool call fills it too), so it never delays listening,

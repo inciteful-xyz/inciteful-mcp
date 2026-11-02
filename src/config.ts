@@ -1,6 +1,12 @@
 import { inspect } from 'node:util';
 
-export interface Config { graphPrimary: URL; graphSecondary: URL; openalexKey: string; publicBaseUrl: URL; usageDbPath: string }
+export interface Config {
+  graphPrimary: URL; graphSecondary: URL; openalexKey: string; publicBaseUrl: URL; usageDbPath: string;
+  /** Sentry client key URL; a public key. */
+  sentryDsn: string;
+  /** The running image's commit, reported to Sentry as the release. */
+  gitSha: string;
+}
 
 // Every variable is required. There are no defaults, so a misconfigured pod fails at startup
 // instead of silently calling the wrong server. Error messages name the variable, never its value.
@@ -20,14 +26,27 @@ function httpUrl(env: NodeJS.ProcessEnv, name: string): URL {
   return url;
 }
 
+/** A Sentry DSN: https, with the public key as the user name and a project id path. */
+function sentryDsn(env: NodeJS.ProcessEnv, name: string): string {
+  const raw = required(env, name);
+  let url: URL;
+  try { url = new URL(raw); } catch { throw new Error(`${name} must be a Sentry DSN (https://<key>@<host>/<project>)`); }
+  if (url.protocol !== 'https:' || !url.username || url.password || !/^\/\d+$/.test(url.pathname) || url.search || url.hash) {
+    throw new Error(`${name} must be a Sentry DSN (https://<key>@<host>/<project>)`);
+  }
+  return raw;
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv): Config {
   const graphPrimary = httpUrl(env, 'GRAPH_API_PRIMARY_URL');
   const graphSecondary = httpUrl(env, 'GRAPH_API_SECONDARY_URL');
   const openalexKey = required(env, 'OPENALEX_ACADEMIC_API_KEY');
   const publicBaseUrl = httpUrl(env, 'PUBLIC_BASE_URL');
   const usageDbPath = required(env, 'USAGE_DB_PATH');
-  const visible = () => ({ graphPrimary: graphPrimary.href, graphSecondary: graphSecondary.href, openalexKey: '[redacted]', publicBaseUrl: publicBaseUrl.href, usageDbPath });
-  const config = { graphPrimary, graphSecondary, publicBaseUrl, usageDbPath } as Config;
+  const dsn = sentryDsn(env, 'SENTRY_DSN');
+  const gitSha = required(env, 'GIT_SHA');
+  const visible = () => ({ graphPrimary: graphPrimary.href, graphSecondary: graphSecondary.href, openalexKey: '[redacted]', publicBaseUrl: publicBaseUrl.href, usageDbPath, sentryDsn: dsn, gitSha });
+  const config = { graphPrimary, graphSecondary, publicBaseUrl, usageDbPath, sentryDsn: dsn, gitSha } as Config;
   // Non-enumerable, so a spread or Object.entries drops the key; toJSON and inspect redact it.
   Object.defineProperties(config, {
     // A getter over the closure: even inspect with customInspect: false shows [Getter], not the value.

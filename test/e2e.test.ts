@@ -57,7 +57,8 @@ function setup(env: Record<string, string> = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'e2e-'));
   const config = loadConfig({
     GRAPH_API_PRIMARY_URL: 'http://graph-api-academic', GRAPH_API_SECONDARY_URL: 'http://graph-api', OPENALEX_ACADEMIC_API_KEY: KEY,
-    PUBLIC_BASE_URL: 'https://incitefulmed.com/academic/mcp', USAGE_DB_PATH: join(dir, 'usage.sqlite'), ...env,
+    PUBLIC_BASE_URL: 'https://incitefulmed.com/academic/mcp', USAGE_DB_PATH: join(dir, 'usage.sqlite'),
+    SENTRY_DSN: 'https://publickey@o1.ingest.sentry.invalid/42', GIT_SHA: 'test', ...env,
   });
   const { state, fakeFetch } = upstreams();
   const graph = new GraphClient(config, fakeFetch);

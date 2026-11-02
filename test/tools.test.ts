@@ -908,6 +908,40 @@ test('onToolSettled throwing does not change the result', async () => {
   } finally { await close(); }
 });
 
+// ---------------------------------------------------------------------------------------------
+// onUnexpectedError
+
+test('onUnexpectedError_gets_only_errors_describeError_does_not_know', async () => {
+  const bug = new TypeError("Cannot read properties of undefined (reading 'id')");
+  const { deps } = fakes({
+    resolve: async inputs => {
+      if (inputs.includes('bug')) throw bug;
+      if (inputs.includes('down')) throw new GraphUnavailableError(9);
+      return inputs.map(resolveOne);
+    },
+  });
+  const reported: Array<[unknown, string]> = [];
+  const { client, close } = await connect({ ...deps, onUnexpectedError: (err, tool) => { reported.push([err, tool]); } });
+  try {
+    const call = async (name: string, args: Record<string, unknown>) => (await client.callTool({ name, arguments: args })) as unknown as Result;
+    assert.equal(text(await call('find_similar_papers', { seeds: ['bug'] })), 'The tool failed unexpectedly.');
+    await call('find_similar_papers', { seeds: ['down'] });
+    await call('search_literature', { query: 'x', year_from: 2020, year_to: 2010 });
+    await call('get_papers', { ids: ['W1'] });
+    assert.deepEqual(reported, [[bug, 'find_similar_papers']]);
+  } finally { await close(); }
+});
+
+test('onUnexpectedError throwing does not change the result', async () => {
+  const { deps } = fakes({ resolve: async () => { throw new TypeError('bug'); } });
+  const { client, close } = await connect({ ...deps, onUnexpectedError: () => { throw new Error('reporter down'); } });
+  try {
+    const r = (await client.callTool({ name: 'find_similar_papers', arguments: { seeds: ['W1'] } })) as unknown as Result;
+    assert.ok(r.isError);
+    assert.equal(text(r), 'The tool failed unexpectedly.');
+  } finally { await close(); }
+});
+
 test('openalexCalls counts real OpenAlex requests per call', async () => {
   const fetcher = (async (input: string | URL | Request) => {
     const url = new URL(String(input));
