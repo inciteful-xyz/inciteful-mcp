@@ -221,8 +221,8 @@ export const QUERY_EXAMPLES = [
 const DESCRIPTIONS: Record<ToolName, string> = {
   search_literature: [
     'A live keyword search of OpenAlex (CC0 metadata), not of the citation graph snapshot. It matches titles, abstracts and full text where OpenAlex has it, ranked by relevance.',
-    'Use it to find candidate seed papers when you have a topic but no DOIs yet, then pass their IDs to find_similar_papers or explore_citation_network;',
-    'it is not a systematic search.',
+    'Use it to find seed papers when you have a topic but no DOIs yet, then pass their IDs to find_similar_papers or explore_citation_network:',
+    'keyword matches miss related work that uses different words, which the citation graph finds. It is not a systematic search.',
     'Returns OpenAlex ID, DOI, title, year, venue, global cited_by_count, type, is_retracted and has_abstract; page with next_cursor.',
     `limit is at most ${MAX_SEARCH_LIMIT}. For abstracts and authors use get_papers.`,
   ].join(' '),
@@ -233,7 +233,7 @@ const DESCRIPTIONS: Record<ToolName, string> = {
     'Inputs it cannot match come back in unresolved with a reason.',
   ].join(' '),
   find_similar_papers: [
-    'The default first step for finding related literature.',
+    'The core tool for finding related literature: it ranks papers by their citation links to the seeds, so it surfaces work that keyword search misses.',
     `Give 1–${MAX_SEEDS} seed papers (DOIs, OpenAlex IDs or PMIDs); returns the papers most similar to them by citation links, sorted by score.`,
     'Method: fast similarity, Adamic/Adar plus Salton co-citation on a depth-1 citation graph; with several seeds, Adamic/Adar against a synthetic paper that cites all the seeds.',
     'Seeds are left out of the results, and scores rank within one result set.',
@@ -241,7 +241,7 @@ const DESCRIPTIONS: Record<ToolName, string> = {
     `limit is at most ${MAX_ANALYSIS_LIMIT}. Unresolved seeds are listed in diagnostics.`,
   ].join(' '),
   explore_citation_network: [
-    `Rank papers, authors, journals or institutions in the depth-2 citation graph Inciteful builds around 1–${MAX_SEEDS} seed papers.`,
+    `Map a field by its citations rather than its keywords: rank papers, authors, journals or institutions in the depth-2 citation graph Inciteful builds around 1–${MAX_SEEDS} seed papers.`,
     'analysis: similar (shared references and co-citation with the seeds), important (local PageRank), reviews (papers citing many others in the graph),',
     'recent (PageRank among papers from the last 3 years), authors, journals, institutions;',
     "or references / citations: the seeds' reference lists or citing papers from OpenAlex, sorted by global cited_by_count, with the total count.",

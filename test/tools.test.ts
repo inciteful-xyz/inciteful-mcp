@@ -235,7 +235,9 @@ test('descriptions carry the required facts', async () => {
   await withClient({}, async ({ client }) => {
     const { tools } = await client.listTools();
     const d = Object.fromEntries(tools.map(t => [t.name, t.description ?? '']));
-    assert.match(d.find_similar_papers, /default first step/);
+    assert.match(d.find_similar_papers, /core tool for finding related literature.*keyword search misses/);
+    assert.match(d.search_literature, /keyword matches miss related work.*citation graph finds/);
+    assert.match(d.explore_citation_network, /by its citations rather than its keywords/);
     assert.match(d.search_literature, /live keyword search of OpenAlex.*not of the citation graph snapshot/);
     assert.match(d.search_literature, /titles, abstracts and full text where OpenAlex has it/);
     assert.match(d.search_literature, /not a systematic search/);
@@ -258,7 +260,16 @@ test('descriptions carry the required facts', async () => {
 test('instructions_fit_and_follow_the_copy_rules', () => {
   // Claude Code cuts instructions at 4,096 characters; ChatGPT weighs the first 512 most.
   assert.ok(INSTRUCTIONS.length <= 4_096, `${INSTRUCTIONS.length} characters`);
-  assert.match(INSTRUCTIONS.slice(0, 512), /Use it for literature searches, related work, .+ and BibTeX\/RIS export\./);
+  // The opening says what sets the server apart and routes to the graph tools.
+  const opening = INSTRUCTIONS.slice(0, 512);
+  assert.match(opening, /citation graph is what sets it apart from keyword search tools/);
+  assert.match(opening, /always run the graph tools \(find_similar_papers, explore_citation_network\) before you answer/);
+  assert.match(opening, /names a paper, DOI or PMID, go straight to the graph/);
+  assert.match(INSTRUCTIONS, /Use it for literature searches, related work, .+ and BibTeX\/RIS export\./);
+  // Seeds from a search go straight to the graph; the user confirms snowball rounds, not the seeds.
+  assert.match(INSTRUCTIONS, /pick 3-5 well-cited, on-topic papers yourself, and tell the user which you used/);
+  assert.doesNotMatch(INSTRUCTIONS, /confirm them with the user/);
+  assert.match(INSTRUCTIONS, /add as seeds just the papers they confirm as relevant/);
   assert.equal(INSTRUCTIONS, INSTRUCTIONS.trim());
   const hit = copyRuleHit(INSTRUCTIONS);
   assert.equal(hit, null, `instructions: "${hit}"`);
