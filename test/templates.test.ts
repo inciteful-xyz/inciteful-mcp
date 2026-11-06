@@ -194,5 +194,6 @@ test('methodFor names each method', () => {
   assert.equal(methodFor('citations', true), 'OpenAlex cited_by:/cites: filter, sorted by global cited_by_count');
   assert.equal(methodFor('fast_similar', false), 'fast similarity: Adamic/Adar + Salton, depth 1');
   assert.equal(methodFor('fast_similar', true), 'fast similarity: Adamic/Adar, depth 1 (multi-seed)');
+  assert.equal(methodFor('fast_merged', true), 'fast similarity: Adamic/Adar + Salton per seed, depth 1; seed rankings merged by reciprocal rank (k=60)');
   for (const a of analyses) for (const multiple of [false, true]) assert.ok(methodFor(a, multiple).length > 0);
 });

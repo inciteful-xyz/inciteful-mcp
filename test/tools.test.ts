@@ -14,7 +14,7 @@ import type { ConnectorResult, GraphClient, SimilarPaper } from '../src/graph.js
 import {
   BuildDeadlineError, GraphError, GraphUnavailableError, OpenAlexBudgetExhausted, OpenAlexRateLimited, QueryTimeoutError,
 } from '../src/errors.js';
-import { MAX_CONNECTOR_PATHS, MAX_READ_CHARS, METADATA_WAIT_MS, OUTPUT_CAP_BYTES, TOOL_CEILING_MS } from '../src/limits.js';
+import { MAX_CONNECTOR_PATHS, MAX_MERGED_SEEDS, MAX_READ_CHARS, MERGE_DEPTH, METADATA_WAIT_MS, OUTPUT_CAP_BYTES, TOOL_CEILING_MS } from '../src/limits.js';
 import type { BuildCapLike, SeedResolution } from '../src/types.js';
 import { copyRuleHit } from './copyrules.js';
 
@@ -439,26 +439,106 @@ test('all_unresolved_makes_no_graph_call', async () => {
 // ---------------------------------------------------------------------------------------------
 // Per tool
 
-test('similar_drops_seeds_and_zero_scores', async () => {
-  // A seed that cites another seed shares a reference with W0, so it can score above 0 too.
-  const similar = async () => [paper('W9', 2.5), paper('W2', 1.9), paper('W8', 1.5), paper('W7', 0.5), paper('W6', 0), paper('W1', 0)];
+test('similar_single_seed_keeps_the_graph_score', async () => {
+  const similar = async () => [paper('W9', 2.5), paper('W1', 1.9), paper('W8', 1.5), paper('W7', 0.5), paper('W6', 0)];
   await withClient({ similar }, async ({ call, calls }) => {
-    const r = await call('find_similar_papers', { seeds: ['W1', 'W2'], limit: 2 });
-    assert.deepEqual(calls.similar, [{ ids: ['W1', 'W2'], n: 4 }]);
-    const sc = r.structuredContent!;
+    const sc = (await call('find_similar_papers', { seeds: ['W1'], limit: 2 })).structuredContent!;
+    assert.deepEqual(calls.similar, [{ ids: ['W1'], n: 3 }]);
     assert.deepEqual(sc.rows.map((p: any) => [p.paper_id, p.score]), [['W9', 2.5], ['W8', 1.5]]);
     assert.deepEqual(sc.rows[0], {
       paper_id: 'W9', doi: '10.1/W9', title: 'Paper W9', published_year: 2021, journal: 'J', authors: ['A', 'B', 'C'],
       num_cited_by: 3, num_citing: 4, score: 2.5, inciteful_url: 'https://incitefulmed.com/academic/p/W9',
     });
-    assert.equal(sc.provenance.method, 'fast similarity: Adamic/Adar, depth 1 (multi-seed)');
+    assert.equal(sc.provenance.method, 'fast similarity: Adamic/Adar + Salton, depth 1');
     assert.equal(sc.provenance.graph.depth, 1);
     assert.equal(sc.provenance.graph.papers, null);
-    assert.equal(sc.inciteful_url, 'https://incitefulmed.com/academic/p?ids[]=W1&ids[]=W2');
   });
-  await withClient({ similar }, async ({ call }) => {
-    const r = await call('find_similar_papers', { seeds: ['W1', 'W2'], limit: 10 });
-    assert.deepEqual(r.structuredContent!.rows.map((p: any) => p.paper_id), ['W9', 'W8', 'W7']);
+});
+
+test('similar_merges_seed_rankings_by_rank_not_raw_score', async () => {
+  // W1's raw scores dwarf W2's. Summing them would put W5 on top; ranks put the paper both lists hold there.
+  const lists: Record<string, SimilarPaper[]> = {
+    W1: [paper('W5', 100), paper('W9', 90), paper('W8', 80)],
+    W2: [paper('W9', 0.2), paper('W6', 0.1)],
+  };
+  await withClient({ similar: async ([id]) => lists[id] }, async ({ call, calls }) => {
+    const sc = (await call('find_similar_papers', { seeds: ['W2', 'W1'], limit: 3 })).structuredContent!;
+    assert.deepEqual(calls.similar, [{ ids: ['W1'], n: MERGE_DEPTH }, { ids: ['W2'], n: MERGE_DEPTH }]);
+    assert.deepEqual(sc.rows.map((p: any) => p.paper_id), ['W9', 'W5', 'W6']);
+    assert.ok(Math.abs(sc.rows[0].score - (1 / 62 + 1 / 61)) < 1e-12);
+    assert.ok(Math.abs(sc.rows[1].score - 1 / 61) < 1e-12);
+    assert.equal(sc.provenance.method, 'fast similarity: Adamic/Adar + Salton per seed, depth 1; seed rankings merged by reciprocal rank (k=60)');
+    assert.equal(sc.provenance.graph.depth, 1);
+    assert.equal(sc.provenance.graph.papers, null);
+    assert.equal(sc.inciteful_url, 'https://incitefulmed.com/academic/p?ids[]=W2&ids[]=W1');
+  });
+});
+
+test('similar_ranks_after_dropping_seeds_and_zero_scores', async () => {
+  // A seed and a score-0 row must not use up a rank: W9 stays at rank 1 in both lists.
+  const lists: Record<string, SimilarPaper[]> = {
+    W1: [paper('W2', 5), paper('W9', 4), paper('W6', 0)],
+    W2: [paper('W1', 5), paper('W9', 3), paper('W7', 0)],
+  };
+  await withClient({ similar: async ([id]) => lists[id] }, async ({ call }) => {
+    const sc = (await call('find_similar_papers', { seeds: ['W1', 'W2'] })).structuredContent!;
+    assert.deepEqual(sc.rows.map((p: any) => p.paper_id), ['W9']);
+    assert.ok(Math.abs(sc.rows[0].score - 2 / 61) < 1e-12);
+  });
+});
+
+test('similar_ties_do_not_depend_on_seed_order', async () => {
+  const lists: Record<string, SimilarPaper[]> = { W1: [paper('W9', 1)], W2: [paper('W7', 1)] };
+  await withClient({ similar: async ([id]) => lists[id] }, async ({ call }) => {
+    for (const seeds of [['W1', 'W2'], ['W2', 'W1']]) {
+      const sc = (await call('find_similar_papers', { seeds })).structuredContent!;
+      assert.deepEqual(sc.rows.map((p: any) => p.paper_id), ['W9', 'W7']);
+    }
+  });
+});
+
+test('similar_limit_does_not_change_the_merged_ranking', async () => {
+  // Honours n, like graph-api. W5 is at rank 60 in both lists: any depth past 50 lets it beat a rank-1 paper
+  // found by one seed, so a higher limit would reorder the top of the result.
+  const list = (top: string) => [paper(top, 100), ...Array.from({ length: 58 }, (_, i) => paper(`W${1000 + i}`, 50 - i / 100)), paper('W5', 1)];
+  const lists: Record<string, SimilarPaper[]> = { W1: list('W7'), W2: list('W8') };
+  await withClient({ similar: async ([id], n) => lists[id].slice(0, n) }, async ({ call, calls }) => {
+    const ids = async (limit: number) => (await call('find_similar_papers', { seeds: ['W1', 'W2'], limit })).structuredContent!.rows.map((p: any) => p.paper_id);
+    const low = await ids(10);
+    const high = await ids(100);
+    assert.deepEqual(high.slice(0, 10), low);
+    assert.ok(!high.includes('W5'));
+    assert.deepEqual(calls.similar.map(s => s.n), [MERGE_DEPTH, MERGE_DEPTH, MERGE_DEPTH, MERGE_DEPTH]);
+  });
+});
+
+test('similar_fails_when_any_seed_ranking_fails', async () => {
+  const similar = async ([id]: string[]) => {
+    if (id === 'W2') throw new GraphUnavailableError(null);
+    return [paper('W9', 1)];
+  };
+  await withClient({ similar }, async ({ call, settled }) => {
+    const r = await call('find_similar_papers', { seeds: ['W1', 'W2'] });
+    assert.ok(r.isError);
+    assert.deepEqual(settled.map(s => s.outcome), ['upstream_unavailable']);
+  });
+});
+
+test('similar_uses_one_shared_graph_above_the_merge_cap', async () => {
+  const ids = (n: number) => Array.from({ length: n }, (_, i) => `W${100 + i}`);
+  await withClient({}, async ({ call, calls }) => {
+    const r = await call('find_similar_papers', { seeds: ids(MAX_MERGED_SEEDS) });
+    assert.equal(calls.similar.length, MAX_MERGED_SEEDS);
+    assert.match(r.structuredContent!.provenance.method, /merged by reciprocal rank/);
+  });
+  // A seed that cites another seed can score above 0 here too.
+  const similar = async () => [paper('W9', 2.5), paper('W100', 1.9), paper('W8', 1.5), paper('W6', 0)];
+  await withClient({ similar }, async ({ call, calls }) => {
+    const seeds = ids(MAX_MERGED_SEEDS + 1);
+    const sc = (await call('find_similar_papers', { seeds, limit: 2 })).structuredContent!;
+    assert.deepEqual(calls.similar, [{ ids: [...seeds].sort(), n: MAX_MERGED_SEEDS + 3 }]);
+    assert.deepEqual(sc.rows.map((p: any) => [p.paper_id, p.score]), [['W9', 2.5], ['W8', 1.5]]);
+    assert.equal(sc.provenance.method, 'fast similarity: Adamic/Adar, depth 1 (multi-seed)');
   });
 });
 
@@ -689,16 +769,16 @@ test('build cap keys and deadline', async () => {
     await call('query_citation_graph', { seeds: ['W2', 'W1'], sql: 'SELECT 1', limit: 9 });
     await call('connect_papers', { from: 'W1', to: 'W2' });
     const keys = calls.cap.map(c => c.key);
-    assert.equal(keys[0], keys[1], 'identical requests share a key');
+    assert.equal(keys[0], keys[2], 'identical requests share a key');
     assert.deepEqual(keys.map(k => JSON.parse(k)), [
-      ['similar', ['W1', 'W2'], 7], ['similar', ['W1', 'W2'], 7],
+      ['similar', ['W1'], MERGE_DEPTH], ['similar', ['W2'], MERGE_DEPTH], ['similar', ['W1'], MERGE_DEPTH], ['similar', ['W2'], MERGE_DEPTH],
       ['query', ['W1'], calls.query[0].sql, 25], ['metadata', ['W1']],
       ['query', ['W1', 'W2'], 'SELECT 1', 9], ['metadata', ['W1', 'W2']],
       ['connector', 'W1', 'W2', false],
     ]);
     // On a still clock: builds get now + the ceiling; metadata waits min(deadline, now + 5 s).
     const [C, M] = [TOOL_CEILING_MS, METADATA_WAIT_MS];
-    assert.deepEqual(calls.cap.map(c => c.deadlineAt - NOW.getTime()), [C, C, C, M, C, M, C]);
+    assert.deepEqual(calls.cap.map(c => c.deadlineAt - NOW.getTime()), [C, C, C, C, C, M, C, M, C]);
   });
 });
 

@@ -11,7 +11,7 @@ import {
 import type { ConnectorPaper, GraphClient, SimilarPaper } from './graph.js';
 import { INSTRUCTIONS } from './instructions.js';
 import {
-  DEFAULT_SQL_LIMIT, MAX_ANALYSIS_LIMIT, MAX_CONNECTOR_PATHS, MAX_ID_CHARS, MAX_PAPER_IDS, MAX_QUERY_CHARS, MAX_READ_CHARS, MAX_SEARCH_LIMIT, MAX_SEEDS, MAX_SQL_CHARS, MAX_SQL_LIMIT, MIN_SQL_LIMIT,
+  DEFAULT_SQL_LIMIT, MAX_ANALYSIS_LIMIT, MAX_CONNECTOR_PATHS, MAX_ID_CHARS, MAX_MERGED_SEEDS, MAX_PAPER_IDS, MAX_QUERY_CHARS, MAX_READ_CHARS, MAX_SEARCH_LIMIT, MAX_SEEDS, MAX_SQL_CHARS, MAX_SQL_LIMIT, MERGE_DEPTH, MERGE_RRF_K, MIN_SQL_LIMIT,
   METADATA_WAIT_MS, TOOL_CEILING_MS, URL_SEED_CAP, type ToolName,
 } from './limits.js';
 import { countOpenAlexRequests, type OpenAlexClient, type Work } from './openalex.js';
@@ -235,7 +235,8 @@ const DESCRIPTIONS: Record<ToolName, string> = {
   find_similar_papers: [
     'The core tool for finding related literature: it ranks papers by their citation links to the seeds, so it surfaces work that keyword search misses.',
     `Give 1–${MAX_SEEDS} seed papers (DOIs, OpenAlex IDs or PMIDs); returns the papers most similar to them by citation links, sorted by score.`,
-    'Method: fast similarity, Adamic/Adar plus Salton co-citation on a depth-1 citation graph; with several seeds, Adamic/Adar against a synthetic paper that cites all the seeds.',
+    'Method: fast similarity, Adamic/Adar plus Salton co-citation on a depth-1 citation graph.',
+    `With 2–${MAX_MERGED_SEEDS} seeds, each seed is ranked separately and the rankings are merged by reciprocal rank, so papers that rank well for several seeds come out on top; above ${MAX_MERGED_SEEDS}, it uses Adamic/Adar against a synthetic paper that cites all the seeds.`,
     'Seeds are left out of the results, and scores rank within one result set.',
     'It is quicker than explore_citation_network, which builds a depth-2 graph for rankings such as important, reviews and recent.',
     `limit is at most ${MAX_ANALYSIS_LIMIT}. Unresolved seeds are listed in diagnostics.`,
@@ -364,6 +365,22 @@ function clientInfoOf(ctx: ServerContext, server: McpServer): ToolSettled['clien
 }
 
 const num = (v: string | undefined) => (v === undefined || !Number.isFinite(Number(v)) ? null : Number(v));
+
+/**
+ * Reciprocal-rank fusion: a paper at rank r in a ranking adds 1 / (k + r), and papers are sorted by
+ * the sum. Ranks rather than scores, because one seed's raw scores can dwarf another's. Ties keep the
+ * order the papers were first met in, so callers pass the rankings in a fixed order.
+ */
+function mergeRankings(rankings: SimilarPaper[][]): SimilarPaper[] {
+  const merged = new Map<string, SimilarPaper>();
+  for (const ranking of rankings) {
+    ranking.forEach((paper, i) => {
+      const score = (merged.get(paper.id)?.score ?? 0) + 1 / (MERGE_RRF_K + i + 1);
+      merged.set(paper.id, { ...paper, score });
+    });
+  }
+  return [...merged.values()].sort((a, b) => b.score - a.score);
+}
 
 export function createServerFactory(deps: ToolDeps): McpServerFactory {
   const urls: Urls = createUrls(deps.publicBaseUrl);
@@ -526,18 +543,22 @@ export function createServerFactory(deps: ToolDeps): McpServerFactory {
     register('find_similar_papers', z.object({ seeds, limit: limit(MAX_ANALYSIS_LIMIT, 25) }), async (a, call) => {
       const r = await resolveSeeds(a.seeds, call);
       const multiple = r.ids.length > 1;
+      const merge = multiple && r.ids.length <= MAX_MERGED_SEEDS;
       const link = r.ids.length ? urls.seedSetUrl(r.inputOrder) : null;
       const prov = (meta: GraphMeta) => provenanceFor('find_similar_papers', r, meta, {
-        method: methodFor('fast_similar', multiple), filters: {}, fastPath: 'similar',
+        method: methodFor(merge ? 'fast_merged' : 'fast_similar', multiple), filters: {}, fastPath: 'similar',
       }, link);
       if (!r.ids.length) return { rows: [], ...prov(r.meta) };
-      const n = a.limit + r.ids.length;
-      const { papers, ...meta } = await buildCap.run(capKey('similar', r.ids, n), () => graph.similar(r.ids, n), call.deadlineAt);
+      const similar = (ids: string[], n: number) => buildCap.run(capKey('similar', ids, n), () => graph.similar(ids, n), call.deadlineAt);
+      const answers = merge
+        ? await Promise.all(r.ids.map(id => similar([id], MERGE_DEPTH)))
+        : [await similar(r.ids, a.limit + r.ids.length)];
       call.graphDepth = 1;
       const seedIds = new Set(r.ids);
-      const rows = papers.filter(p => !seedIds.has(p.id) && p.score > 0).slice(0, a.limit)
-        .map(p => ({ ...graphPaperRow(p), score: p.score }));
-      return { rows, ...prov(meta) };
+      const rankings = answers.map(x => x.papers.filter(p => !seedIds.has(p.id) && p.score > 0));
+      const papers = merge ? mergeRankings(rankings) : rankings[0];
+      const rows = papers.slice(0, a.limit).map(p => ({ ...graphPaperRow(p), score: p.score }));
+      return { rows, ...prov(answers[0]) };
     });
 
     register('explore_citation_network', z.object({
