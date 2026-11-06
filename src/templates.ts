@@ -1,6 +1,8 @@
 // Fixed SQL templates for `explore_citation_network`, from Inciteful's single- and multi-seed dashboards.
 // Single-seed graphs put the seed at distance 0. Multi-seed graphs put the synthetic W0 at 0 and the seeds at 1.
 
+import { MERGE_RRF_K } from './limits.js';
+
 export const analyses = ['similar', 'important', 'reviews', 'recent', 'authors', 'journals', 'institutions'] as const;
 export type Analysis = typeof analyses[number];
 
@@ -61,8 +63,11 @@ export function analysisSql(a: Analysis, multiple: boolean, o: AnalysisOptions):
 
 const OPENALEX_LINKED = 'OpenAlex cited_by:/cites: filter, sorted by global cited_by_count';
 
-/** The provenance `method` for each analysis. `fast_similar` is `find_similar_papers`' graph-api fast path. */
-export function methodFor(a: Analysis | 'references' | 'citations' | 'fast_similar', multiple: boolean): string {
+/**
+ * The provenance `method` for each analysis. `fast_similar` is `find_similar_papers`' graph-api fast
+ * path on one graph; `fast_merged` is the same path run per seed, with the rankings merged.
+ */
+export function methodFor(a: Analysis | 'references' | 'citations' | 'fast_similar' | 'fast_merged', multiple: boolean): string {
   const graph = multiple ? 'local; multi-seed graph rooted at a synthetic paper citing all seeds' : 'local; single-seed graph';
   switch (a) {
     case 'references':
@@ -71,6 +76,8 @@ export function methodFor(a: Analysis | 'references' | 'citations' | 'fast_simil
     case 'fast_similar':
       // Nothing cites W0, so the Salton part is always 0 with several seeds.
       return multiple ? 'fast similarity: Adamic/Adar, depth 1 (multi-seed)' : 'fast similarity: Adamic/Adar + Salton, depth 1';
+    case 'fast_merged':
+      return `fast similarity: Adamic/Adar + Salton per seed, depth 1; seed rankings merged by reciprocal rank (k=${MERGE_RRF_K})`;
     case 'similar':
       return multiple
         ? `adamic_adar (Adamic/Adar against the synthetic paper; seeds' direct neighbours only; ${graph})`

@@ -28,6 +28,17 @@ export const BUILD_CAP = 4;
 export const MAX_PAPER_IDS = 100;
 /** Seeds per graph tool. */
 export const MAX_SEEDS = 500;
+/**
+ * `find_similar_papers` ranks each seed separately and merges the rankings, up to this many seeds. Each
+ * seed is its own graph build, so this bounds how long one call can hold the build cap. Above it, all
+ * the seeds go in one synthetic-paper graph. In a 24-topic test the two methods tied from 16 seeds up, and
+ * merging was clearly better at 4 and below. 8 was too close to call, and 9 to 15 weren't tested.
+ */
+export const MAX_MERGED_SEEDS = 15;
+/** Rows taken from each seed's ranking before merging. Fixed, so `limit` never changes the merged order; a merged result can hold fewer rows than a high `limit`. */
+export const MERGE_DEPTH = 50;
+/** The constant in reciprocal-rank fusion: a paper at rank r adds 1 / (k + r). 60 is the conventional value. */
+export const MERGE_RRF_K = 60;
 /** `limit` caps: `search_literature`; `find_similar_papers` and `explore_citation_network`; `query_citation_graph`. */
 export const MAX_SEARCH_LIMIT = 50;
 export const MAX_ANALYSIS_LIMIT = 100;
