@@ -221,24 +221,23 @@ export const QUERY_EXAMPLES = [
 const DESCRIPTIONS: Record<ToolName, string> = {
   search_literature: [
     'A live keyword search of OpenAlex (CC0 metadata), not of the citation graph snapshot. It matches titles, abstracts and full text where OpenAlex has it, ranked by relevance.',
-    'Use it to find seed papers when you have a topic but no DOIs yet, then pass their IDs to find_similar_papers or explore_citation_network:',
-    'keyword matches miss related work that uses different words, which the citation graph finds. It is not a systematic search.',
+    'Use it to find seed papers when you have a topic but no DOIs yet.',
+    'Keyword matches miss related work that uses different words, which the citation graph finds. It is not a systematic search.',
     'Returns OpenAlex ID, DOI, title, year, venue, global cited_by_count, type, is_retracted and has_abstract; page with next_cursor.',
-    `limit is at most ${MAX_SEARCH_LIMIT}. For abstracts and authors use get_papers.`,
+    `limit is at most ${MAX_SEARCH_LIMIT}. Rows carry no abstracts or authors.`,
   ].join(' '),
   get_papers: [
     `Fetch OpenAlex records for up to ${MAX_PAPER_IDS} papers by DOI, OpenAlex ID (W…), PMID or PMCID:`,
     'abstract, authors, venue, type and version, is_retracted, PMID/PMCID and the best open-access link with its licence.',
-    'Use it to read abstracts and check retraction and preprint status before citing. It does not use the citation graph.',
+    'It does not use the citation graph.',
     'Inputs it cannot match come back in unresolved with a reason.',
   ].join(' '),
   find_similar_papers: [
-    'The core tool for finding related literature: it ranks papers by their citation links to the seeds, so it surfaces work that keyword search misses.',
+    'Ranks papers by their citation links to the seeds, which surfaces related work that keyword search misses.',
     `Give 1–${MAX_SEEDS} seed papers (DOIs, OpenAlex IDs or PMIDs); returns the papers most similar to them by citation links, sorted by score.`,
     'Method: fast similarity, Adamic/Adar plus Salton co-citation on a depth-1 citation graph.',
     `With 2–${MAX_MERGED_SEEDS} seeds, each seed is ranked separately and the rankings are merged by reciprocal rank, so papers that rank well for several seeds come out on top; above ${MAX_MERGED_SEEDS}, it uses Adamic/Adar against a synthetic paper that cites all the seeds.`,
     'Seeds are left out of the results, and scores rank within one result set.',
-    'It is quicker than explore_citation_network, which builds a depth-2 graph for rankings such as important, reviews and recent.',
     `limit is at most ${MAX_ANALYSIS_LIMIT}. Unresolved seeds are listed in diagnostics.`,
   ].join(' '),
   explore_citation_network: [
@@ -246,7 +245,7 @@ const DESCRIPTIONS: Record<ToolName, string> = {
     'analysis: similar (shared references and co-citation with the seeds), important (local PageRank), reviews (papers citing many others in the graph),',
     'recent (PageRank among papers from the last 3 years), authors, journals, institutions;',
     "or references / citations: the seeds' reference lists or citing papers from OpenAlex, sorted by global cited_by_count, with the total count.",
-    'A graph that is not cached yet can take a minute to build; use find_similar_papers for a quick look.',
+    'A graph that is not cached yet can take a minute to build.',
     `title_all / title_any / title_none filter by words in paper titles. ${TITLE_FILTER}`,
     'year_from / year_to filter by publication year. Title and year filters apply to the graph analyses, not to references or citations.',
     `limit is at most ${MAX_ANALYSIS_LIMIT}. Results carry provenance (method, graph size and depth, the SQL run) and diagnostics.`,
@@ -254,18 +253,17 @@ const DESCRIPTIONS: Record<ToolName, string> = {
   connect_papers: [
     'Find citation paths between two papers (DOI, OpenAlex ID or PMID), treating each citation as a link in either direction.',
     'Returns the paths, the citation edges (citing → cited), the papers on the paths, and each path\'s hop count in provenance.hops.',
-    'extended: true also returns longer paths, aiming for at least 5. Use it to see how two lines of work relate;',
-    "for a paper's wider neighbourhood use find_similar_papers.",
+    'extended: true also returns longer paths, aiming for at least 5. It shows how two lines of work relate.',
   ].join(' '),
   query_citation_graph: [
-    `Run your own read-only SQLite query on the citation graph Inciteful builds around 1–${MAX_SEEDS} seed papers (depth 2, the same graph as explore_citation_network).`,
-    "Use it when explore_citation_network's fixed analyses don't answer the question.",
+    `Run your own read-only SQLite query on the citation graph Inciteful builds around 1–${MAX_SEEDS} seed papers (depth 2).`,
+    'It queries the Inciteful citation graph API; schema: https://incitefulmed.com/academic/help/power-users#database-schema',
     `Rules: a single SELECT statement. Rows returned: the limit argument if given, else the query's trailing LIMIT, else ${DEFAULT_SQL_LIMIT}; at most ${MAX_SQL_LIMIT}.`,
     'OFFSET (and LIMIT a, b) is rejected; page with a narrower WHERE or an ORDER BY instead.',
     '\n\nSchema:',
     '\n- papers(paper_id TEXT: OpenAlex ID (W…); doi TEXT without the https://doi.org/ prefix; authors TEXT: JSON array of {author_id, name, sequence, position, institution {id, name, ror}};',
     'num_authors INTEGER; title TEXT; published_year INTEGER; journal TEXT; num_citing INTEGER; num_cited_by INTEGER; distance INTEGER; page_rank REAL; adamic_adar REAL; cocite REAL).',
-    'num_citing and num_cited_by are in-graph counts (citations between papers in this graph); get_papers has the global cited_by_count.',
+    'num_citing and num_cited_by are in-graph counts (citations between papers in this graph), not global citation counts.',
     '\n- authors(author_id TEXT: OpenAlex author ID without the A prefix; paper_id TEXT; name TEXT; sequence INTEGER, from 0; affiliation TEXT;',
     'affiliation_id TEXT: OpenAlex institution ID without the I prefix; ror TEXT: ROR URL; published_year INTEGER; partial_page_rank REAL: the author\'s share of the paper\'s page_rank)',
     '\n- metadata(name TEXT, value TEXT): one row each for graph_depth, graph_snapshot, prune_threshold, highly_cited_not_expanded, seeds_not_expanded, paper_count, citation_count.',
@@ -278,7 +276,6 @@ const DESCRIPTIONS: Record<ToolName, string> = {
     'names(ror_id, name, name_types, language), external_ids(ror_id, id_type, preferred_id, external_id), relationships(ror_id, related_ror_id, related_name, relationship_type).',
     '\n\nWhat the schema cannot tell you:',
     '\n- There is no edge table, so SQL cannot tell which papers cite which.',
-    "For a seed's references or citing papers use explore_citation_network with analysis 'references' or 'citations'.",
     '\n- Papers with no citation inside the graph have NULL num_citing, num_cited_by, distance, page_rank, adamic_adar and cocite.',
     '\n- With one seed, the seed is at distance 0, its citing and cited papers at 1 and their neighbours at 2, so distance > 0 leaves the seed out.',
     'With several seeds a synthetic paper W0 ("Temp Paper", year 1900) cites every seed: W0 is at distance 0, the seeds at 1 and their neighbours at 2,',
@@ -292,7 +289,7 @@ const DESCRIPTIONS: Record<ToolName, string> = {
     'Read the full text of an open-access paper from PubMed Central (PMC BioC) in chunks: pass offset (0 to start) and max_chars',
     `(up to ${MAX_READ_CHARS}), then continue from next_offset until it is null.`,
     'Returns the article\'s licence and a sha256 of the whole text. When PMC has no text for the paper, returns candidate open-access links',
-    '(publisher or repository) in rows instead. Accepts a DOI, OpenAlex ID, PMID or PMCID. Use get_papers for the abstract.',
+    '(publisher or repository) in rows instead. Accepts a DOI, OpenAlex ID, PMID or PMCID.',
   ].join(' '),
   export_citations: [
     `Build BibTeX or RIS citations for up to ${MAX_PAPER_IDS} papers (DOI, OpenAlex ID, PMID or PMCID) from their OpenAlex records,`,
@@ -501,7 +498,7 @@ export function createServerFactory(deps: ToolDeps): McpServerFactory {
         return result;
       };
       server.registerTool(name, {
-        title: TITLES[name], description: DESCRIPTIONS[name], inputSchema, outputSchema: outputs[name], annotations: ANNOTATIONS,
+        title: TITLES[name], description: DESCRIPTIONS[name], inputSchema, outputSchema: outputs[name], annotations: { title: TITLES[name], ...ANNOTATIONS },
       }, executor as never);
     }
 

@@ -216,7 +216,7 @@ test('tool_contract', async () => {
       export_citations: 'Export citations',
     });
     for (const t of tools) {
-      assert.deepEqual(t.annotations, { readOnlyHint: true, destructiveHint: false, openWorldHint: true, idempotentHint: true }, t.name);
+      assert.deepEqual(t.annotations, { title: t.title, readOnlyHint: true, destructiveHint: false, openWorldHint: true, idempotentHint: true }, t.name);
       assert.equal(t.outputSchema?.type, 'object', t.name);
       const props = t.outputSchema?.properties as Record<string, any>;
       assert.ok(props.rows, `${t.name} has top-level rows`);
@@ -235,8 +235,8 @@ test('descriptions carry the required facts', async () => {
   await withClient({}, async ({ client }) => {
     const { tools } = await client.listTools();
     const d = Object.fromEntries(tools.map(t => [t.name, t.description ?? '']));
-    assert.match(d.find_similar_papers, /core tool for finding related literature.*keyword search misses/);
-    assert.match(d.search_literature, /keyword matches miss related work.*citation graph finds/);
+    assert.match(d.find_similar_papers, /citation links to the seeds.*keyword search misses/);
+    assert.match(d.search_literature, /Keyword matches miss related work.*citation graph finds/);
     assert.match(d.explore_citation_network, /by its citations rather than its keywords/);
     assert.match(d.search_literature, /live keyword search of OpenAlex.*not of the citation graph snapshot/);
     assert.match(d.search_literature, /titles, abstracts and full text where OpenAlex has it/);
@@ -246,6 +246,7 @@ test('descriptions carry the required facts', async () => {
       'distance 0', 'ror.organizations', 'title_terms', 'metadata', 'OFFSET', 'single SELECT', "the query's trailing LIMIT"]) {
       assert.ok(q.includes(fact), `query_citation_graph mentions ${fact}`);
     }
+    assert.match(q, /Inciteful citation graph API; schema: https:\/\/incitefulmed\.com\/academic\/help\/power-users#database-schema/);
     assert.equal(QUERY_EXAMPLES.length, 2);
     for (const sql of QUERY_EXAMPLES) assert.ok(q.includes(sql), 'example in the description');
     assert.match(d.explore_citation_network, /titles only \(not abstracts or full text\), with Porter stemming/);
@@ -253,6 +254,10 @@ test('descriptions carry the required facts', async () => {
       assert.doesNotMatch(desc, /(?<!read-)\bonly\b(?! \(not abstracts)/i, `${name}: no "only"`);
       assert.doesNotMatch(desc, /\bfirst\b(?! step)/i, `${name}: no "first" superlative`);
       assert.doesNotMatch(desc, /not (be )?logged|never logged|no logs/i, `${name}: no logging claim`);
+      // Claude's directory: a tool description says what that tool does, and doesn't direct the model to other tools.
+      for (const other of tools.map(t => t.name).filter(n => n !== name)) {
+        assert.ok(!desc.includes(other), `${name}: names ${other}`);
+      }
     }
   });
 });
