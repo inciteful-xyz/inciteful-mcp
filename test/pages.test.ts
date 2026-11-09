@@ -96,6 +96,7 @@ test('client_panels_static', () => {
     assert.ok(panels[i].includes(step), `${client} has "${step}"`);
     assert.match(panels[i], /Steps checked on 2026-10-30/);
   });
+  assert.match(html, /<section class="panel"[^>]*>[\s\S]*?<a href="https:\/\/claude\.ai\/directory\/inciteful">Claude’s connector directory<\/a>/);
   // Every panel's text is in the HTML; the toggle is CSS only.
   assert.equal(scripts(html).some(s => /panel/.test(s.body)), false);
 });
