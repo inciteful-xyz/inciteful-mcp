@@ -1,6 +1,6 @@
 # Inciteful MCP
 
-**https://incitefulmed.com/academic/mcp**
+**[https://incitefulmed.com/academic/mcp](https://incitefulmed.com/academic/mcp)**
 
 Add this URL to your assistant as a remote MCP server. It connects Claude, ChatGPT, Cursor or any MCP client to Inciteful's citation graph: it snowballs from seed papers, finds the important and review papers around them, and traces the paths between two papers.
 

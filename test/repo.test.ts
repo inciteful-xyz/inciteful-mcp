@@ -8,7 +8,7 @@ const pkg = JSON.parse(read('package.json')) as { version: string };
 const README = read('README.md');
 
 test('readme_opens_with_url_and_follows_copy_rules', () => {
-  assert.equal(README.split('\n')[2], '**https://incitefulmed.com/academic/mcp**');
+  assert.equal(README.split('\n')[2], '**[https://incitefulmed.com/academic/mcp](https://incitefulmed.com/academic/mcp)**');
   assert.ok(README.includes('Free · No account · OpenAlex metadata (CC0) · Open-source server (MIT)'));
   assert.doesNotMatch(README, /\/resources/i);
   // Privacy lives on one page; the README links to it rather than restating it.
