@@ -20,10 +20,13 @@ const pre = (s: string) => `<pre><code>${esc(s)}</code></pre>`;
 /** Escaped, with line-break opportunities after single slashes, so the URL wraps at path segments. */
 const breakable = (url: string) => esc(url).replace(/(?<=[^/])\/(?=[^/])/g, '/<wbr>');
 
+const CLAUDE_DIRECTORY = 'https://claude.ai/directory/inciteful';
+
 const CLIENTS: Client[] = [
   {
     id: 'claude', name: 'Claude',
-    steps: l => `<ol>
+    steps: l => `<p>Inciteful is listed in <a href="${CLAUDE_DIRECTORY}">Claude’s connector directory</a>. Open the listing and connect it from there, or add it by hand:</p>
+<ol>
 <li>In Claude, open ${b('Customize → Connectors')}, click ${b('+ Add')}, then ${b('Add custom connector')}.</li>
 <li>Name it “Inciteful”, paste <code>${breakable(l.mcp)}</code> as the server URL, and continue.</li>
 <li>Under ${b('Authentication')}, choose ${b('No sign in')}, then click ${b('Add')}.</li>
@@ -261,7 +264,7 @@ ${example()}
 <details open><summary>Is this the same Inciteful as inciteful.xyz?</summary><p>Yes. Inciteful now lives at incitefulmed.com/academic. The web app, the graph and the methods are unchanged, and it’s still free.</p></details>
 <details><summary>Who builds it, and why is it free?</summary><p>The team behind Inciteful and <a href="${esc(l.site)}">Inciteful Med</a> builds it. Inciteful has been free since it started; the MCP server runs on the same citation graph service as the web app, and fair-use limits keep the cost manageable.</p></details>
 <details><summary>Why is it on a medical domain?</summary><p>Inciteful Academic moved to incitefulmed.com/academic, next to <a href="${esc(l.site)}">Inciteful Med</a>. The graph covers every field in OpenAlex, not just medicine.</p></details>
-<details><summary>Which assistants work?</summary><p>Claude (web, desktop, mobile and Claude Code), ChatGPT where your plan allows custom MCP servers, Cursor, VS Code, and any client that supports remote MCP over Streamable HTTP.</p></details>
+<details><summary>Which assistants work?</summary><p>Claude (web, desktop, mobile and Claude Code; see the <a href="${CLAUDE_DIRECTORY}">Claude directory listing</a>), ChatGPT where your plan allows custom MCP servers, Cursor, VS Code, and any client that supports remote MCP over Streamable HTTP.</p></details>
 <details><summary>My assistant didn’t use Inciteful.</summary><p>Name it in your prompt, for example “Using Inciteful…”. Assistants often default to web search.</p></details>
 <details><summary>Why are some recent papers missing?</summary><p>The graph is updated nightly with new papers that have a Crossref DOI. Other new papers are looked up live when you name them, but don’t appear as neighbours in the graph. Each result’s provenance records the dates of the data it used.</p></details>
 <details><summary>Why did I hit a rate limit?</summary><p>Every Claude user shares one rate-limit bucket, because Claude’s requests reach us from Anthropic’s servers; the same goes for ChatGPT and OpenAI’s servers. If you see a rate-limit error, wait a minute and retry.</p></details>
