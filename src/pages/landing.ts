@@ -201,7 +201,7 @@ ${clientPanels(l)}
 <div class="grid">
 ${tiles()}
 </div>
-<p class="muted">It also includes a literature-review prompt, <code>literature_review</code>, that runs the iterative snowball with you: resolve your seeds, find similar papers, agree 3–5 seeds, explore the network, read the finalists’ abstracts, then write with a DOI for every paper.</p>
+<p class="muted">It also includes a literature-review prompt, <code>literature_review</code>, that runs the iterative snowball with you: resolve your seeds, find similar papers, agree 10 or more seeds, explore the network, read the finalists’ abstracts, then write with a DOI for every paper.</p>
 </div></section>
 
 <section class="sec alt"><div class="wrap">
