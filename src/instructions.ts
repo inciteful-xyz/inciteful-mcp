@@ -9,7 +9,7 @@ export const INSTRUCTIONS = [
   'Inciteful covers the OpenAlex citation graph (all fields; CC0 metadata; open-access full text from PubMed Central). Use it for literature searches, related work, key or review papers on a topic, citation chasing (references and citing papers), how two papers connect, and BibTeX/RIS export. It is not a systematic search.',
   '',
   'Typical flow:',
-  '1. Seeds: use the papers the user names. Otherwise run search_literature, pick 3-5 well-cited, on-topic papers yourself, and tell the user which you used (title, year, DOI) so they can swap any. A keyword result list is a seed list, not an answer.',
+  '1. Seeds: use the papers the user names. Otherwise run search_literature, pick 10 or more well-cited, on-topic papers yourself (more seeds give better graph results), and tell the user which you used (title, year, DOI) so they can swap any. A keyword result list is a seed list, not an answer.',
   '2. find_similar_papers on the seeds (seconds).',
   '3. explore_citation_network for important papers, reviews and recent work around the seeds, plus their references and citations. A new graph can take about a minute; if a call says it is still working, repeat the same call, which joins the running build.',
   '4. connect_papers to show how two papers or lines of work relate; query_citation_graph for your own SQL.',
@@ -30,3 +30,7 @@ export const INSTRUCTIONS = [
   '',
   'Limits: about 60 requests per minute per caller (hosted Claude and ChatGPT users share one larger bucket per vendor); on a rate-limit error, wait the time it gives. Long results are cut (truncated: true); lower limit or add title or year filters.',
 ].join('\n');
+
+// Returned with every search_literature result, so clients that drop the server instructions still
+// see that a search is the start of the flow. Tool results may name other tools; descriptions may not.
+export const SEARCH_NEXT_STEP = 'These rows are seed candidates, not an answer. Pick 10 or more well-cited papers that are squarely on the topic (search again or raise limit if too few are), then run find_similar_papers and explore_citation_network on them before you answer.';

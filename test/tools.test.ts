@@ -5,7 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { AjvJsonSchemaValidator } from '@modelcontextprotocol/client/validators/ajv';
 import { createMcpHandler } from '@modelcontextprotocol/server';
-import { INSTRUCTIONS } from '../src/instructions.js';
+import { INSTRUCTIONS, SEARCH_NEXT_STEP } from '../src/instructions.js';
 import { createServerFactory, QUERY_EXAMPLES, type ToolSettled } from '../src/tools.js';
 import { createUrls } from '../src/urls.js';
 import { OpenAlexClient, type Work } from '../src/openalex.js';
@@ -272,7 +272,7 @@ test('instructions_fit_and_follow_the_copy_rules', () => {
   assert.match(opening, /names a paper, DOI or PMID, go straight to the graph/);
   assert.match(INSTRUCTIONS, /Use it for literature searches, related work, .+ and BibTeX\/RIS export\./);
   // Seeds from a search go straight to the graph; the user confirms snowball rounds, not the seeds.
-  assert.match(INSTRUCTIONS, /pick 3-5 well-cited, on-topic papers yourself, and tell the user which you used/);
+  assert.match(INSTRUCTIONS, /pick 10 or more well-cited, on-topic papers yourself \(more seeds give better graph results\), and tell the user which you used/);
   assert.doesNotMatch(INSTRUCTIONS, /confirm them with the user/);
   assert.match(INSTRUCTIONS, /add as seeds just the papers they confirm as relevant/);
   assert.equal(INSTRUCTIONS, INSTRUCTIONS.trim());
@@ -838,6 +838,10 @@ test('get_papers and search_literature rows', async () => {
     assert.deepEqual(calls.search, [{ query: 'vagus', opts: { limit: 5, cursor: 'abc', yearFrom: 2010, yearTo: undefined, openAccess: true } }]);
     assert.ok(calls.signals.length === 2 && calls.signals.every(sig => sig instanceof AbortSignal && !sig.aborted), 'non-build calls get the call signal');
     assert.equal(s.structuredContent!.next_cursor, 'next-1');
+    // Every search result routes to the graph tools, for clients that drop the server instructions.
+    assert.equal(s.structuredContent!.next_step, SEARCH_NEXT_STEP);
+    assert.match(SEARCH_NEXT_STEP, /Pick 10 or more .* find_similar_papers and explore_citation_network/);
+    assert.equal(copyRuleHit(SEARCH_NEXT_STEP), null);
     assert.deepEqual(s.structuredContent!.rows[1], {
       openalex_id: 'W2', doi: '10.1/w2', title: 'Title of W2', year: 2020, venue: 'Journal of Tests', cited_by_count: 10,
       type: 'article', is_retracted: false, has_abstract: false, inciteful_url: 'https://incitefulmed.com/academic/p/W2',
@@ -1068,7 +1072,7 @@ test('prompt_requires_topic_or_seeds', async () => {
     for (const step of [
       '1. resolve the seeds;',
       '2. run `find_similar_papers`;',
-      '3. propose 3–5 seeds and wait for the user to confirm them (a checkpoint);',
+      '3. propose 10 or more seeds and wait for the user to confirm them (a checkpoint);',
       '4. run `explore_citation_network` for `important`, `reviews` and `recent`, plus `references` and `citations` on the confirmed seeds;',
       '5. show the user the new candidates, add as seeds just the papers they confirm as relevant, and repeat step 4; stop when a round turns up no new relevant papers, or after 3 rounds, then ask before going further; report the rounds and why you stopped;',
       '6. with `get_papers`, fetch the finalists\' abstracts, check retraction and preprint status, and merge duplicate versions of one work;',

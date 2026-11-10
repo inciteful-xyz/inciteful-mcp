@@ -9,7 +9,7 @@ import {
   BuildDeadlineError, GraphError, GraphUnavailableError, OpenAlexBudgetExhausted, OpenAlexError, OpenAlexRateLimited, QueryTimeoutError, TitleFilterError,
 } from './errors.js';
 import type { ConnectorPaper, GraphClient, SimilarPaper } from './graph.js';
-import { INSTRUCTIONS } from './instructions.js';
+import { INSTRUCTIONS, SEARCH_NEXT_STEP } from './instructions.js';
 import {
   DEFAULT_SQL_LIMIT, MAX_ANALYSIS_LIMIT, MAX_CONNECTOR_PATHS, MAX_ID_CHARS, MAX_MERGED_SEEDS, MAX_PAPER_IDS, MAX_QUERY_CHARS, MAX_READ_CHARS, MAX_SEARCH_LIMIT, MAX_SEEDS, MAX_SQL_CHARS, MAX_SQL_LIMIT, MERGE_DEPTH, MERGE_RRF_K, MIN_SQL_LIMIT,
   METADATA_WAIT_MS, TOOL_CEILING_MS, URL_SEED_CAP, type ToolName,
@@ -176,7 +176,7 @@ const graphCommon = { ...common, provenance: provenanceSchema, inciteful_url: z.
 const unresolvedSchema = z.array(z.object({ input: z.string(), reason: z.enum(['not_found', 'unavailable']) }));
 
 const outputs = {
-  search_literature: z.object({ rows: z.array(openalexRowSchema), next_cursor: z.string().nullable(), ...common }),
+  search_literature: z.object({ rows: z.array(openalexRowSchema), next_cursor: z.string().nullable(), next_step: z.string(), ...common }),
   get_papers: z.object({ rows: z.array(fullPaperSchema), unresolved: unresolvedSchema, ...common }),
   find_similar_papers: z.object({ rows: z.array(graphPaperSchema.extend({ score: z.number() })), ...graphCommon }),
   explore_citation_network: z.object({ analysis: z.string(), rows: z.array(z.record(z.string(), z.unknown())), ...graphCommon }),
@@ -315,7 +315,7 @@ const TITLES: Record<ToolName, string> = {
 const REVIEW_STEPS = [
   '1. resolve the seeds;',
   '2. run `find_similar_papers`;',
-  '3. propose 3–5 seeds and wait for the user to confirm them (a checkpoint);',
+  '3. propose 10 or more seeds and wait for the user to confirm them (a checkpoint);',
   '4. run `explore_citation_network` for `important`, `reviews` and `recent`, plus `references` and `citations` on the confirmed seeds;',
   '5. show the user the new candidates, add as seeds just the papers they confirm as relevant, and repeat step 4; stop when a round turns up no new relevant papers, or after 3 rounds, then ask before going further; report the rounds and why you stopped;',
   "6. with `get_papers`, fetch the finalists' abstracts, check retraction and preprint status, and merge duplicate versions of one work;",
@@ -517,7 +517,7 @@ export function createServerFactory(deps: ToolDeps): McpServerFactory {
       const { works, nextCursor } = await openalex.search(a.query, {
         limit: a.limit, cursor: a.cursor, yearFrom: a.year_from, yearTo: a.year_to, openAccess: a.open_access, signal: call.signal,
       });
-      return { rows: works.map(openalexRow), next_cursor: nextCursor };
+      return { rows: works.map(openalexRow), next_cursor: nextCursor, next_step: SEARCH_NEXT_STEP };
     });
 
     register('get_papers', z.object({ ids: idList.describe(`1–${MAX_PAPER_IDS} DOIs, OpenAlex IDs, PMIDs or PMCIDs.`) }), async (a, call) => {
